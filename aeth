@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+# Use absolute paths to avoid issues when launching from different terminals
+AETH_HOME="$HOME/Aeth"
+AETH_CONFIG_DIR="$HOME/.config/Aeth"
+
+# Ensure the config directory exists before launching
+mkdir -p "$AETH_CONFIG_DIR"
+
+# Navigate to project and exec
+# Using 'exec' replaces the bash process with the Cabal process, 
+# which is cleaner for a shell launcher.
+cabal --project-dir="$AETH_HOME" run Aeth -- "$@"
