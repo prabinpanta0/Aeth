@@ -7,8 +7,8 @@ module Aeth.Config
     renderPromptSegments,
     defaultConfig,
     loadConfig,
-    initPrompt,
     getPrompt,
+    setPromptFunction,
     configDir,
     configHsPath,
     configTomlPath,
@@ -19,7 +19,6 @@ where
 
 import Aeth.Structured (StructuredValue (..))
 import Aeth.Types (ShellState (..))
-import Control.Concurrent (forkIO)
 import Control.Exception (IOException, try)
 import Data.Char (isAsciiUpper, isSpace, toLower)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -33,9 +32,8 @@ import qualified System.Environment as Env
 import qualified System.Exit as Exit
 import qualified System.FilePath as FP
 import System.IO.Unsafe (unsafePerformIO)
-import qualified System.Posix.DynamicLinker as DL
 import qualified System.Process as Proc
-import Toml (TomlCodec, decode, parse, (.=))
+import Toml (TomlCodec, (.=))
 import qualified Toml
 
 -- Minimal, safe surface area for user customization.
@@ -119,9 +117,6 @@ uiModeFromText "normal" = NormalUi
 uiModeFromText "tui" = TuiUi
 uiModeFromText t = error ("invalid ui_mode: " <> T.unpack t)
 
-uiModeCodec :: TomlCodec UiMode
-uiModeCodec = Toml.dimap uiModeToText uiModeFromText (Toml.text "ui_mode")
-
 tomlConfigCodec :: TomlCodec TomlConfig
 tomlConfigCodec =
   Toml.table
@@ -188,74 +183,12 @@ promptRef :: IORef (ShellState -> IO String)
 promptRef = unsafePerformIO (newIORef (prompt defaultConfig))
 {-# NOINLINE promptRef #-}
 
--- | Checks if config.so exists and is newer than config.hs
-configSoUpToDate :: IO Bool
-configSoUpToDate = do
-  hsPath <- configHsPath
-  soPath <- configSoPath
-  hsExists <- Dir.doesFileExist hsPath
-  soExists <- Dir.doesFileExist soPath
-  if not (hsExists && soExists)
-    then pure False
-    else do
-      hsTime <- Dir.getModificationTime hsPath
-      soTime <- Dir.getModificationTime soPath
-      pure (soTime > hsTime)
-
-configSoPath :: IO FilePath
-configSoPath = do
-  dir <- configDir
-  pure (dir FP.</> "config.so")
-
--- | Loads the prompt function from config.so using dynamic linker
-loadPromptFromSo :: FilePath -> IO (Maybe (ShellState -> IO String))
-loadPromptFromSo soPath = do
-  -- This assumes the .so exports a symbol "aeth_prompt" of type ShellState -> IO String
-  -- You must ensure ABI compatibility and symbol name during compilation
-  -- This is a stub: actual implementation will require FFI and stable ABI
-  pure Nothing -- TODO: Implement FFI loading
-
--- | Compiles config.hs to config.so in a background thread
-compileConfigSo :: IO ()
-compileConfigSo = do
-  hsPath <- configHsPath
-  soPath <- configSoPath
-  -- Use the same GHC as main binary, with -shared -dynamic
-  _ <- forkIO $ do
-    _ <- Proc.readProcess "ghc" ["-shared", "-dynamic", hsPath, "-o", soPath] ""
-    -- After compilation, attempt to load the new prompt function
-    mPrompt <- loadPromptFromSo soPath
-    case mPrompt of
-      Just fn -> writeIORef promptRef fn
-      Nothing -> pure ()
-  pure ()
-
--- | Initializes the prompt function at shell startup
-initPrompt :: IO ()
-initPrompt = do
-  upToDate <- configSoUpToDate
-  soPath <- configSoPath
-  if upToDate
-    then do
-      mPrompt <- loadPromptFromSo soPath
-      case mPrompt of
-        Just fn -> writeIORef promptRef fn
-        Nothing -> fallback
-    else fallback
-  where
-    fallback = do
-      -- Use hint to interpret config.hs, or default prompt
-      hsPath <- configHsPath
-      exists <- Dir.doesFileExist hsPath
-      if not exists
-        then writeIORef promptRef (prompt defaultConfig)
-        else do
-          result <- try (loadHaskellConfig hsPath) :: IO (Either IOException (ShellConfig, Maybe String))
-          case result of
-            Right (cfg, _) -> writeIORef promptRef (prompt cfg)
-            _ -> writeIORef promptRef (prompt defaultConfig)
-      -- Start background compilation
-      compileConfigSo
+-- | Install the prompt function to be used by the interactive loop.
+--
+-- The prompt is loaded by 'loadConfig'. Keeping this as a simple IORef write
+-- avoids doing any expensive config loading work twice.
+setPromptFunction :: (ShellState -> IO String) -> IO ()
+setPromptFunction = writeIORef promptRef
 
 -- | Use this function to get the current prompt function
 getPrompt :: IO (ShellState -> IO String)
@@ -464,13 +397,6 @@ loadHaskellConfig filePath = do
                     )
                 _ ->
                   pure (\_ -> pure ("Aeth: unsupported myPrompt type: " <> ty <> "\n"))
-
-    mUseTui <- Hint.typeChecks "useTui"
-    useTuiVal <-
-      if mUseTui
-        then Hint.interpret "useTui" (Hint.as :: Bool)
-        else pure False
-    -- uiMode is now from TOML, ignore useTui here
 
     pure ShellConfig {prompt = promptFn, uiMode = NormalUi, structuredExtensions = []}
 

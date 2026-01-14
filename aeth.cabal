@@ -15,7 +15,6 @@ executable Aeth
     -O2
     -threaded
     -rtsopts
-    -fprof-auto
     "-with-rtsopts=-N -A4m -qn1"
     -fexpose-all-unfoldings
     -fspecialise-aggressively
@@ -25,9 +24,11 @@ executable Aeth
     Aeth.LineEditor
     Aeth.LineEditorVty
     Aeth.Config
+    Aeth.ConfigFast
     Aeth.Parse
     Aeth.ParseMegaparsec
     Aeth.Shell
+    Aeth.ShellFast
     Aeth.Structured
     Aeth.Types
 

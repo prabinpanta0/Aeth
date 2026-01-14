@@ -1,11 +1,12 @@
 # Aeth
+
 [![prabinpanta0](https://img.shields.io/badge/prabinpanta0-red)](https://github.com/prabinpanta0)
 ![NISH](https://img.shields.io/badge/Aeth-Nesh-green)
 
 An elegant polymorphic shell that lacks the concept of elegance.
 
-* **Version:** Nish (0.0.0.0)
-* **License:** [MIT](LICENSE)
+-   **Version:** 0.1.0
+-   **License:** [MIT](LICENSE)
 
 <div align="center">
   <img src="docs/assets/aeth.png" alt="Aeth Prompt" width="600"/>
@@ -16,7 +17,7 @@ A hybrid Linux shell written in Haskell, designed to bridge the legacy world of 
 Aeth is a **polymorphic shell** that doesn't force you into one paradigm. Instead of choosing between traditional Unix shells (text streams) or modern shells like Nushell (structured data), Aeth provides both:
 
 -   **Raw Mode:** `ls` → Returns text (traditional shell behavior)
--   **Structured Mode:** `@ls` → Returns structured data (Haskell types)
+-   **Structured Mode:** `@ls` → Returns structured data (tables)
 
 This allows you to leverage decades of Unix tools while also enjoying the benefits of type-safe structured data manipulation.
 
@@ -26,12 +27,17 @@ This allows you to leverage decades of Unix tools while also enjoying the benefi
 
 ### Core Shell Capabilities
 
+-   **⚡ Fast Startup:** ~25ms launch time
 -   **Process Management:** Fork/exec to launch external programs
 -   **Path Resolution:** Finds executables through `$PATH`
--   **I/O Redirection:** Supports `<`, `>`, and `2>` (coming soon)
--   **Piping:** Connect stdout → stdin for raw commands
--   **Built-in Commands:** `cd`, `exit`
--   **Environment Management:** Handles `$HOME`, `$USER`, `$PATH`, etc.
+-   **Piping:** Connect stdout → stdin for commands
+-   **Built-in Commands:** `cd`, `exit`, `export`, `pwd`, `history`, `clear`
+-   **Environment Variables:** Full access to all system variables (`$HOME`, `$USER`, `$PATH`, etc.)
+-   **Tab Completion:** Command and path completion
+-   **Signal Handling:** Proper Ctrl+C and Ctrl+D handling
+-   **IDE Compatible:** Works correctly in VS Code and other IDE terminals
+-   **AI/Copilot Compatible:** Can receive programmatic input
+-   **Proper Quoting:** Supports `"double quotes"`, `'single quotes'`, and `escape\ characters`
 
 ### Structured Commands
 
@@ -39,19 +45,13 @@ This allows you to leverage decades of Unix tools while also enjoying the benefi
 -   **`@pwd`** - Print working directory as structured text
 -   **`filter`** - Filter structured tables with expressions
 
-### Dynamic Prompt
+### Configurable Prompt
 
-The prompt displays contextual information:
+Choose from built-in prompt styles or customize colors:
 
--    Current time
--    User@hostname
--    Current directory (with home shortening)
--    Git branch (when in a git repo)
--    Language/framework icons (Haskell, Python, Node, Rust, Go, C)
--    Primary IP address
--    Battery percentage (laptops)
--    Last command duration
--    Exit status indicator
+-   **minimal:** `~/projects (main) > `
+-   **powerline:** `~/projects  main  ✓`
+-   **simple:** `user@host:~/projects$ `
 
 ---
 
@@ -59,8 +59,7 @@ The prompt displays contextual information:
 
 ### Prerequisites
 
--   GHC 9.6.7+ and Cabal
--   Nerd Font (for icon rendering in prompt)
+-   GHC 9.6+ and Cabal
 
 ### Build
 
@@ -69,9 +68,14 @@ The prompt displays contextual information:
 git clone https://github.com/prabinpanta0/Aeth
 cd Aeth
 
-# Build and run
+# Build
 cabal build
+
+# Run
 cabal run Aeth
+
+# Or install to ~/.cabal/bin
+cabal install
 ```
 
 ---
@@ -84,7 +88,7 @@ cabal run Aeth
 ./aeth
 ```
 
-You'll see the dynamic prompt. Try these commands:
+Try these commands:
 
 ```bash
 # Raw mode (traditional shell)
@@ -108,9 +112,9 @@ cat README.md | grep Aeth
 Execute commands directly:
 
 ```bash
-cabal run Aeth -- -c "ls -la"
-cabal run Aeth -- -c "@ls"
-cabal run Aeth -- -c "@pwd"
+./aeth -c "ls -la"
+./aeth -c "@ls"
+./aeth -c "echo 'hello world'"
 ```
 
 ### Filtering Structured Data
@@ -132,15 +136,34 @@ The `filter` command allows rich queries on structured tables:
 
 ## Configuration
 
-Aeth uses a Haskell-based configuration file for maximum flexibility and type safety.
+Aeth uses a simple TOML-like configuration file.
 
 ### Default Location
 
 ```
-~/.config/Aeth/config.hs
+~/.config/Aeth/config.toml
 ```
 
-The repository includes a template at `config/config.hs` that you can customize and copy to the location above.
+### Example Configuration
+
+```toml
+# UI Mode: 'normal' or 'tui' (fullscreen)
+ui_mode = "normal"
+
+# Prompt Style: 'minimal', 'powerline', or 'simple'
+prompt_style = "minimal"
+
+# Prompt features
+show_git_branch = true
+show_exit_code = true
+show_duration = false
+
+# Colors: black, red, green, yellow, blue, magenta, cyan, white, gray
+cwd_color = "cyan"
+git_color = "magenta"
+error_color = "red"
+success_color = "green"
+```
 
 ### Quick Setup
 
@@ -149,10 +172,10 @@ The repository includes a template at `config/config.hs` that you can customize 
 mkdir -p ~/.config/Aeth
 
 # Copy template
-cp config/config.hs ~/.config/Aeth/config.hs
+cp config/config.toml ~/.config/Aeth/config.toml
 
 # Edit to customize
-$EDITOR ~/.config/Aeth/config.hs
+$EDITOR ~/.config/Aeth/config.toml
 ```
 
 For detailed configuration options, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
@@ -161,7 +184,7 @@ For detailed configuration options, see [docs/CONFIGURATION.md](docs/CONFIGURATI
 
 ## Documentation
 
--   [Configuration Guide](docs/CONFIGURATION.md) - Customize prompts, colors, icons, and add structured commands
+-   [Configuration Guide](docs/CONFIGURATION.md) - Customize prompts, colors, and settings
 -   [Architecture Overview](docs/ARCHITECTURE.md) - Understanding the hybrid shell design
 
 ---
@@ -170,31 +193,32 @@ For detailed configuration options, see [docs/CONFIGURATION.md](docs/CONFIGURATI
 
 This is an early prototype. Known limitations:
 
--    No quoting/escaping in parser yet (whitespace-based)
--    Multi-stage raw pipelines are delegated to `/bin/sh -c`
--    Structured pipelines (`@a | @b`) not yet implemented
--    Limited I/O redirection support
--    Small set of built-in structured commands
+-   Multi-stage raw pipelines are delegated to `/bin/sh -c`
+-   Structured pipelines (`@a | @b`) not yet fully implemented
+-   Limited I/O redirection support (`<`, `>`, `2>`)
+-   Small set of built-in structured commands
 
 ---
 
 ## Roadmap
 
-### Near Term
+### Completed ✅
 
-1.  Minimal REPL with line editing and history
-2.  Basic parser for `@prefix` mode selection
-3.  Builtins: `cd`, `exit`
-4.  First structured commands: `@ls`, `@pwd`
-5.  Table filtering with expressions
+-   [x] Fast startup (~25ms)
+-   [x] Tab completion (commands + paths)
+-   [x] Proper quoting support
+-   [x] Environment variable expansion
+-   [x] Signal handling (Ctrl+C, Ctrl+D)
+-   [x] IDE/AI compatibility
+-   [x] Configurable prompts
 
 ### Next Milestones
 
-1. Replace placeholder parser with full Megaparsec parser (quoting, escapes, redirects)
-2. Implement real process-level piping for raw pipelines
-3. Add structured registry + typed piping bridge (Raw ↔ Structured)
-4. Expand structured command library
-5. Improve display engine (sorting, column selection, themes)
+1. I/O redirection (`<`, `>`, `>>`, `2>`)
+2. Job control (background processes, `&`, `fg`, `bg`)
+3. Command aliases
+4. More structured commands (`@find`, `@ps`, `@df`)
+5. Structured pipeline chaining (`@ls | @filter | @sort`)
 
 ---
 

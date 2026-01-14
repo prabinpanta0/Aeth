@@ -1,2 +1,22 @@
+# Aeth Shell Configuration
+# See docs/CONFIGURATION.md for full documentation
+
+# UI Mode: 'normal' (inline) or 'tui' (fullscreen with scrollback)
 ui_mode = "normal"
-use_dynamic_prompt = true
+
+# Prompt Style: 'minimal', 'powerline', or 'simple'
+# - minimal:   ~/dir (branch) >
+# - powerline: ~/dir | branch | ✓
+# - simple:    user@host:dir$
+prompt_style = "minimal"
+
+# Prompt Features
+show_git_branch = true    # Show current git branch
+show_exit_code = true     # Show error indicator for non-zero exit codes
+show_duration = false     # Show command execution time (if > 100ms)
+
+# Color Names: black, red, green, yellow, blue, magenta, cyan, white, gray
+cwd_color = "cyan"        # Current directory color
+git_color = "magenta"     # Git branch color
+error_color = "red"       # Error indicator color
+success_color = "green"   # Success indicator color

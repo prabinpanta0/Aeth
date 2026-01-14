@@ -16,21 +16,24 @@ import Control.Exception (IOException, try)
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State.Strict (StateT, evalStateT, get, modify')
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import qualified System.Directory as Dir
+import qualified System.Environment as Env
 import qualified System.FilePath as FP
 import System.IO (hFlush, stderr, stdout)
 
 run :: IO ()
 run = do
   initialCwd <- Dir.getCurrentDirectory
-  let st0 = emptyShellState initialCwd
-  -- Initialize prompt system (config.so/hint/background)
-  initPrompt
-  -- Load config for uiMode and extensions (can be cached later)
+  env0 <- Env.getEnvironment
+  let st0 = emptyShellState initialCwd (Map.fromList env0)
+  -- Load config for uiMode and prompt/extensions.
   (cfg, mCfgErr) <- loadConfig
+  -- Install the prompt function once (avoids re-loading config.hs in initPrompt).
+  setPromptFunction (prompt cfg)
   case mCfgErr of
     Nothing -> pure ()
     Just e -> TIO.hPutStrLn stderr ("Aeth: " <> T.pack e)
@@ -45,11 +48,12 @@ runLoop cfg =
 runCommandLine :: String -> IO ()
 runCommandLine line = do
   initialCwd <- Dir.getCurrentDirectory
-  let st0 = emptyShellState initialCwd
+  env0 <- Env.getEnvironment
+  let st0 = emptyShellState initialCwd (Map.fromList env0)
   evalStateT (runOne (T.pack line)) st0
 
 loopNormal :: ShellConfig -> StateT ShellState IO ()
-loopNormal cfg =
+loopNormal _cfg =
   withLineEditor $ \ed -> go ed
   where
     go ed = do
@@ -66,7 +70,7 @@ loopNormal cfg =
           go ed
 
 loopTui :: ShellConfig -> StateT ShellState IO ()
-loopTui cfg = do
+loopTui _cfg = do
   st0 <- get
   _ <- liftIO $ VtyEd.withLineEditor $ \ed -> evalStateT (go ed []) st0
   pure ()

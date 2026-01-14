@@ -2,382 +2,163 @@
 
 This guide explains how to customize Aeth to match your workflow and preferences.
 
-## Configuration File Location
-
-Aeth looks for its configuration files at:
-
-```
-~/.config/Aeth/config.hs
-~/.config/Aeth/rc
-~/.config/Aeth/sequences.txt
-```
-
-A template is provided in the repository at `config/`. Copy it to get started:
+## Quick Start
 
 ```bash
+# Create config directory
 mkdir -p ~/.config/Aeth
-cp config/config.hs ~/.config/Aeth/config.hs
+
+# Copy templates
+cp config/config.toml ~/.config/Aeth/config.toml
 cp config/rc ~/.config/Aeth/rc
-cp config/sequences.txt ~/.config/Aeth/sequences.txt
+```
+
+## Configuration Files
+
+Aeth looks for configuration at:
+
+| File                         | Purpose                                   |
+| ---------------------------- | ----------------------------------------- |
+| `~/.config/Aeth/config.toml` | Main configuration                        |
+| `~/.config/Aeth/rc`          | Startup commands (shell aliases, exports) |
+| `~/.config/Aeth/history`     | Command history (auto-managed)            |
+
+---
+
+## config.toml
+
+The main configuration uses a simple key=value format:
+
+```toml
+# Aeth Shell Configuration
+
+ui_mode = "normal"        # 'normal' or 'tui' (fullscreen)
+prompt_style = "minimal"  # 'minimal', 'powerline', or 'simple'
+
+# Prompt features
+show_git_branch = true
+show_exit_code = true
+show_duration = false
+
+# Colors: black, red, green, yellow, blue, magenta, cyan, white, gray
+cwd_color = "cyan"
+git_color = "magenta"
+error_color = "red"
+success_color = "green"
+```
+
+### Options Reference
+
+| Option            | Values                           | Default   | Description             |
+| ----------------- | -------------------------------- | --------- | ----------------------- |
+| `ui_mode`         | `normal`, `tui`                  | `normal`  | Interface mode          |
+| `prompt_style`    | `minimal`, `powerline`, `simple` | `minimal` | Prompt appearance       |
+| `show_git_branch` | `true`, `false`                  | `true`    | Show git branch         |
+| `show_exit_code`  | `true`, `false`                  | `true`    | Show error indicator    |
+| `show_duration`   | `true`, `false`                  | `false`   | Show execution time     |
+| `cwd_color`       | color name                       | `cyan`    | Directory color         |
+| `git_color`       | color name                       | `magenta` | Git branch color        |
+| `error_color`     | color name                       | `red`     | Error indicator color   |
+| `success_color`   | color name                       | `green`   | Success indicator color |
+
+### Prompt Styles
+
+**minimal** - Clean and simple:
+
+```
+~/projects (main) >
+```
+
+**powerline** - Fancy with segments:
+
+```
+~/projects  main  ✓
+```
+
+**simple** - Classic bash-like:
+
+```
+user@host:~/projects$
 ```
 
 ---
 
-## The `rc` File
+## rc (Startup Commands)
 
-The `rc` file is an optional configuration resource for Aeth, located at:
-
-```
-~/.config/Aeth/rc
-```
-
-### Purpose
-
--   The `rc` file allows you to reference additional configuration resources or run startup commands when Aeth starts.
--   It is typically used to include files such as `sequences.txt` (for key bindings or terminal escape sequences), set environment variables, or run initialization commands.
-
-### Default Example
-
-The default `rc` file provided in the repository contains:
+The `rc` file runs shell commands at startup:
 
 ```sh
-cat ~/.config/Aeth/sequences.txt
+# Environment variables
+export EDITOR=vim
+export PATH="$HOME/bin:$PATH"
+
+# Aliases (via shell passthrough)
+# alias ll='ls -la'  # Not yet supported, use functions instead
 ```
 
-This means that, on startup, Aeth will read and apply the terminal escape sequences or key bindings defined in `sequences.txt`.
-
-### Customization
-
--   You can edit `~/.config/Aeth/rc` to add your own commands or reference other files.
--   For example, to set an environment variable and include a custom key sequence file:
-
-```sh
-export MY_AETH_VAR=1
-cat ~/.config/Aeth/sequences.txt
-cat ~/.config/Aeth/my_custom_keys.txt
-```
-
--   You can use any shell commands supported by your environment.
-
-### Tips
-
--   If you do not need custom startup commands, you can leave the `rc` file as-is or remove it.
--   If you want to add more advanced startup logic, simply add the relevant shell commands to this file.
+Each line is executed as a shell command. Lines starting with `#` are comments.
 
 ---
 
-## Configuration File Structure
+## Structured Data Filtering
 
-The config file is pure Haskell code, giving you maximum flexibility and type safety. The shell dynamically loads it at startup using the `hint` library.
-
-### Basic Structure
-
-```haskell
-module Config where
-
-import Control.Exception (IOException, try)
-import Data.List (isSuffixOf)
-import qualified System.Directory as Dir
-import System.Environment (lookupEnv)
--- ... other imports
-
--- Main configuration options
-useTui :: Bool
-myPromptSegments :: FilePath -> Maybe String -> Int -> Maybe Int -> IO [(String, String, String)]
-myExtensions :: [(String, IO ())]
-```
-
----
-
-## Configuration Options
-
-### 1. UI Mode
-
-Choose between normal line-based UI and fullscreen TUI:
-
-```haskell
-useTui :: Bool
-useTui = False  -- Normal UI (default)
--- useTui = True   -- Fullscreen TUI with scrollback
-```
-
-**Normal UI:** Traditional REPL with readline-style editing (Haskeline)  
-**TUI UI:** Fullscreen interface with scrollback buffer (experimental)
-
----
-
-### 2. Prompt Customization
-
-The prompt is defined by the `myPromptSegments` function, which returns a list of colored segments.
-
-#### Function Signature
-
-```haskell
-myPromptSegments :: FilePath       -- Current directory (home-shortened)
-                 -> Maybe String   -- Git branch (if in git repo)
-                 -> Int            -- Last exit code
-                 -> Maybe Int      -- Last command duration (ms)
-                 -> IO [(String, String, String)]
-```
-
-Each tuple in the result list represents:
-
-1. **Foreground color** (e.g., "red", "green", "blue", "yellow", "cyan", "magenta", "white", "gray")
-2. **Background color** (use "default" for transparency)
-3. **Content** (the text to display)
-
-#### Default Prompt
-
-The default configuration shows:
-
-```haskell
-myPromptSegments cwdPretty gitBranch lastExit lastDurationMs = do
-  username <- getUsername
-  hostname <- nodeName <$> getSystemID
-  now <- getZonedTime
-  let clock = formatTime defaultTimeLocale "%H:%M" now
-  mIp <- getPrimaryIp
-  mBat <- getBatteryPercent
-  langIcons <- detectLangIcons
-
-  pure [
-    ("yellow",  "default", clock ++ " "),
-    ("cyan",    "default", username ++ "@" ++ hostname ++ " "),
-    ("blue",    "default", iconFolder ++ " " ++ cwdPretty),
-    gitSeg gitBranch,
-    langsSeg langIcons,
-    ipSeg mIp,
-    batterySeg mBat,
-    durationSeg lastDurationMs,
-    (arrowColor lastExit, "default", " ~> ")
-  ]
-```
-
-#### Customization Examples
-
-**Minimal prompt:**
-
-```haskell
-myPromptSegments cwdPretty _ lastExit _ =
-  pure [("green", "default", cwdPretty ++ " $ ")]
-```
-
-**Lambda prompt (classic Haskell):**
-
-```haskell
-myPromptSegments cwdPretty _ lastExit _ = do
-  let color = if lastExit == 0 then "green" else "red"
-  pure [
-    ("blue", "default", cwdPretty ++ " "),
-    (color, "default", "λ> ")
-  ]
-```
-
-**Powerline-style:**
-
-```haskell
-myPromptSegments cwdPretty gitBranch lastExit _ = do
-  username <- getUsername
-  pure [
-    ("white", "blue",  " " ++ username ++ " "),
-    ("blue",  "green", ""),  -- Powerline separator
-    ("black", "green", " " ++ cwdPretty ++ " "),
-    gitSegment gitBranch,
-    (exitColor lastExit, "default", " ❯ ")
-  ]
-```
-
----
-
-### 3. Nerd Font Icons
-
-The config provides icon constants using Unicode hex escapes:
-
-```haskell
-iconHaskell = "\xE637"  --
-iconFolder  = "\xF07B"  --
-iconGit     = "\xF418"  --
-iconPython  = "\xF81F"  --
-iconNode    = "\xE718"  --
-iconRust    = "\xE7A8"  --
-iconDocker  = "\xF308"  --
--- ... and more
-```
-
-You can add your own icons by finding their Unicode codepoints in your Nerd Font documentation.
-
----
-
-### 4. Dynamic Context Detection
-
-The config includes helper functions to detect project context:
-
-#### Language/Framework Detection
-
-```haskell
-detectLangIcons :: IO [String]
-```
-
-Automatically detects project types by checking for sentinel files:
-
--   **Haskell:** `.cabal`, `cabal.project`, `stack.yaml`, `package.yaml`
--   **Python:** `pyproject.toml`, `requirements.txt`, `Pipfile`, `poetry.lock`
--   **Node:** `package.json`, `pnpm-lock.yaml`, `yarn.lock`
--   **Rust:** `Cargo.toml`
--   **Go:** `go.mod`
--   **C/C++:** `CMakeLists.txt`, `Makefile`
-
-Customize by modifying the `detectLangIcons` function.
-
-#### Git Branch Detection
-
-Handled automatically by the shell core. Returns `Maybe String`:
-
--   `Just "main"` if in a git repo
--   `Nothing` if not in a repo or git unavailable
-
-#### System Information
-
-```haskell
-getUsername :: IO String         -- Current user
-getPrimaryIp :: IO (Maybe String) -- Primary network IP
-getBatteryPercent :: IO (Maybe String)  -- Battery % (laptops only)
-```
-
----
-
-### 5. Custom Structured Commands
-
-Add your own structured commands to the registry:
-
-```haskell
-myExtensions :: [(String, IO ())]
-myExtensions = [
-  ("@weather", getStructuredWeather),
-  ("@git",     getStructuredGitStatus),
-  ("@docker",  getStructuredDocker),
-  ("@time",    getStructuredTime)  -- Your custom command
-]
-
-getStructuredTime :: IO ()
-getStructuredTime = do
-  now <- getCurrentTime
-  putStrLn $ "Current time: " ++ show now
-```
-
-**Note:** These are currently basic IO actions. Full structured data type support (returning `StructuredValue`) is coming in future versions.
-
----
-
-## Advanced Configuration
-
-### Colors
-
-Supported color names:
-
--   `"black"`, `"red"`, `"green"`, `"yellow"`, `"blue"`, `"magenta"`, `"cyan"`, `"white"`, `"gray"`
--   `"default"` (transparent background, inherits terminal colors)
-
-### Safe File/Process Reading
-
-The config provides safe helpers that handle errors gracefully:
-
-```haskell
-safeReadFile :: FilePath -> IO (Maybe String)
-safeReadProcess :: String -> [String] -> IO (Maybe String)
-```
-
-Use these when adding custom prompt segments that read from files or processes.
-
----
-
-## Filtering Configuration
-
-Structured filtering supports:
-
-**Operators:** `==`, `!=`, `>`, `>=`, `<`, `<=`, `contains`  
-**Fields (from `@ls`):** `.name`, `.kind`, `.size`
-
-Example filters:
+Aeth's structured commands (`@ls`, `@ps`, `@env`) support filtering:
 
 ```bash
 @ls | filter { .size > 1MB }
 @ls | filter { .kind == dir }
 @ls | filter { .name contains config }
+@env | filter { .name contains PATH }
 ```
 
-Size units: `B`, `KB`, `MB`, `GB` (case-insensitive)
+### Filter Syntax
+
+**Operators:** `==`, `!=`, `>`, `>=`, `<`, `<=`, `contains`
+
+**Fields (from @ls):** `.name`, `.kind`, `.size`
+
+**Size units:** `B`, `KB`, `MB`, `GB` (case-insensitive)
 
 ---
 
 ## Troubleshooting
 
-### Config not loading
+### Config Not Loading
 
-1. Check file location: `~/.config/Aeth/config.hs`
-2. Verify it's valid Haskell (shell shows parse errors on startup)
-3. Ensure all imports are available (the template uses only base libraries)
+1. Check path: `~/.config/Aeth/config.toml`
+2. Verify syntax (key = value format)
+3. Run `aeth --debug` for verbose output
 
-### Icons not showing
+### Icons Not Showing
 
-1. Install a Nerd Font: https://www.nerdfonts.com/
+1. Install a [Nerd Font](https://www.nerdfonts.com/)
 2. Configure your terminal to use it
-3. Test with: `echo "\xE637"` (should show )
 
-### Slow prompt
+### Terminal Issues
 
-Dynamic detection (git, language icons, IP, battery) can add latency. Remove expensive operations:
+If your terminal is broken after exit:
 
-```haskell
-myPromptSegments cwdPretty _ lastExit _ =
-  -- Skip all IO operations for speed
-  pure [("green", "default", cwdPretty ++ " $ ")]
-```
+-   This should be fixed in the current version (using haskeline)
+-   Try running `reset` in your normal shell
 
 ---
 
-## Example Configurations
+## Legacy Configuration
 
-### Minimalist
+The old `config.hs` system (Haskell-based configuration) is deprecated but still supported via `--legacy` flag:
 
-```haskell
-useTui = False
-
-myPromptSegments cwdPretty _ lastExit _ =
-  pure [("blue", "default", cwdPretty ++ " λ ")]
-
-myExtensions = []
+```bash
+aeth --legacy  # Use old hint-based config
 ```
 
-### Feature-Rich (Default)
+**Why deprecated?** The `hint` library (GHC interpreter) caused 2-5 second startup delays. The new TOML system starts in ~25ms.
 
-See `config/config.hs` in the repository.
-
-### Powerline-Inspired
-
-```haskell
-myPromptSegments cwdPretty gitBranch lastExit _ = do
-  user <- getUsername
-  host <- nodeName <$> getSystemID
-
-  pure [
-    ("white",  "blue",   " " ++ user ++ "@" ++ host ++ " "),
-    ("blue",   "green",  ""),
-    ("black",  "green",  " " ++ cwdPretty ++ " "),
-    gitSegment gitBranch,
-    (exitColor lastExit, "default", " ❯ ")
-  ]
-  where
-    gitSegment (Just br) = ("white", "magenta", " " ++ iconGit ++ " " ++ br ++ " ")
-    gitSegment Nothing   = ("gray",  "default",  "")
-    exitColor 0 = "green"
-    exitColor _ = "red"
-```
+For legacy configuration documentation, see the [config.hs.legacy](../config/config.hs.legacy) template.
 
 ---
 
 ## Next Steps
 
--   See [ARCHITECTURE.md](ARCHITECTURE.md) for understanding the shell internals
--   Experiment with the template config
--   Share your custom configs with the community!
+-   See [ARCHITECTURE.md](ARCHITECTURE.md) for shell internals
+-   Explore structured commands: `@ls`, `@ps`, `@env`
+-   Customize your prompt style and colors

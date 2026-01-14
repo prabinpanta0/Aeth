@@ -17,7 +17,6 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified System.Directory as Dir
-import qualified System.Environment as Env
 import qualified System.Exit as Exit
 import qualified System.FilePath as FP
 import System.IO (hClose, stderr)
@@ -164,13 +163,15 @@ structuredApply seg input =
     _ -> do
       -- Fallback: run as external command that consumes rendered input and captures stdout.
       st <- get
-      liftIO $ externalToStructuredStdin (cwd st) (envOverrides st) (segName seg) (segArgs seg) (renderStructured input)
+      let envMap = effectiveEnvMap st
+      let name' = expandTextEnv envMap (segName seg)
+      let args' = map (expandTextEnv envMap) (segArgs seg)
+      liftIO $ externalToStructuredStdin (cwd st) envMap name' args' (renderStructured input)
 
 externalToStructuredStdin :: FilePath -> Map.Map String String -> T.Text -> [T.Text] -> T.Text -> IO (StructuredValue, Exit.ExitCode)
-externalToStructuredStdin workingDir envOverrides0 name args stdinText = do
-  expandedArgs <- expandGlobs workingDir args
-  env0 <- Env.getEnvironment
-  let envMerged = Map.toList envOverrides0 ++ env0
+externalToStructuredStdin workingDir envMap name args stdinText = do
+  expandedArgs <- expandGlobs envMap workingDir args
+  let envMerged = Map.toList envMap
   let cp =
         (Proc.proc (T.unpack name) (map T.unpack expandedArgs))
           { Proc.cwd = Just workingDir,
@@ -193,21 +194,40 @@ runRawSingle seg = do
     then pure ()
     else case name of
       "exit" -> liftIO (Exit.exitWith Exit.ExitSuccess)
+      "export" -> runExport args
       "cd" -> do
         st <- get
+        let envMap = effectiveEnvMap st
         let target =
               case args of
                 [] -> Nothing
-                (p : _) -> Just (T.unpack p)
-        result <- liftIO (try (resolveCdTarget target >>= Dir.setCurrentDirectory) :: IO (Either IOException ()))
+                (p : _) -> Just (T.unpack (expandTextEnv envMap p))
+        result <- liftIO (try (resolveCdTarget envMap target >>= Dir.setCurrentDirectory) :: IO (Either IOException ()))
         case result of
           Left e -> do
             liftIO (hPutShellError ("cd: " <> T.pack (show e)))
             put st {lastExitCode = 1}
           Right () -> do
             newDir <- liftIO Dir.getCurrentDirectory
-            put st {cwd = newDir, lastExitCode = 0}
-      _ -> runExternal name args
+            let oldDir = cwd st
+            put
+              st
+                { cwd = newDir,
+                  envOverrides =
+                    Map.insert
+                      "PWD"
+                      newDir
+                      (Map.insert "OLDPWD" oldDir (envOverrides st)),
+                  lastExitCode = 0
+                }
+      _ ->
+        if shouldUseShSegment seg
+          then do
+            -- Delegate complex shell syntax to /bin/sh for compatibility.
+            -- Note: this does not persist any env changes back into Aeth state.
+            let cmdline = renderRawSegment seg
+            runViaSh cmdline
+          else runExternal name args
 
 runRawSingleCapture :: Segment -> StateT ShellState IO T.Text
 runRawSingleCapture seg = do
@@ -217,31 +237,61 @@ runRawSingleCapture seg = do
     then pure ""
     else case name of
       "exit" -> liftIO (Exit.exitWith Exit.ExitSuccess)
+      "export" -> do
+        runExport args
+        pure ""
       "cd" -> do
         st <- get
+        let envMap = effectiveEnvMap st
         let target =
               case args of
                 [] -> Nothing
-                (p : _) -> Just (T.unpack p)
-        result <- liftIO (try (resolveCdTarget target >>= Dir.setCurrentDirectory) :: IO (Either IOException ()))
+                (p : _) -> Just (T.unpack (expandTextEnv envMap p))
+        result <- liftIO (try (resolveCdTarget envMap target >>= Dir.setCurrentDirectory) :: IO (Either IOException ()))
         case result of
           Left e -> do
             put st {lastExitCode = 1}
             pure ("Aeth: cd: " <> T.pack (show e))
           Right () -> do
             newDir <- liftIO Dir.getCurrentDirectory
-            put st {cwd = newDir, lastExitCode = 0}
+            let oldDir = cwd st
+            put
+              st
+                { cwd = newDir,
+                  envOverrides =
+                    Map.insert
+                      "PWD"
+                      newDir
+                      (Map.insert "OLDPWD" oldDir (envOverrides st)),
+                  lastExitCode = 0
+                }
             pure ""
-      _ -> runExternalCapture name args
+      _ ->
+        if shouldUseShSegment seg
+          then runViaShCapture (renderRawSegment seg)
+          else runExternalCapture name args
+
+renderRawSegment :: Segment -> T.Text
+renderRawSegment s = T.unwords (segName s : segArgs s)
+
+shouldUseShSegment :: Segment -> Bool
+shouldUseShSegment s =
+  let cmd = renderRawSegment s
+   in T.any (`elem` (";&><()\\`" :: String)) cmd
+        || T.isInfixOf "&&" cmd
+        || T.isInfixOf "||" cmd
+        || T.isInfixOf "|&" cmd
 
 runExternal :: (MonadIO m) => T.Text -> [T.Text] -> StateT ShellState m ()
 runExternal name args = do
   st <- get
-  expandedArgs <- liftIO (expandGlobs (cwd st) args)
-  env0 <- liftIO Env.getEnvironment
-  let envMerged = Map.toList (envOverrides st) ++ env0
+  let envMap = effectiveEnvMap st
+  let name' = expandTextEnv envMap name
+  let args' = map (expandTextEnv envMap) args
+  expandedArgs <- liftIO (expandGlobs envMap (cwd st) args')
+  let envMerged = Map.toList envMap
   let cp =
-        (Proc.proc (T.unpack name) (map T.unpack expandedArgs))
+        (Proc.proc (T.unpack name') (map T.unpack expandedArgs))
           { Proc.cwd = Just (cwd st),
             Proc.env = Just envMerged
           }
@@ -257,11 +307,13 @@ runExternal name args = do
 runExternalCapture :: T.Text -> [T.Text] -> StateT ShellState IO T.Text
 runExternalCapture name args = do
   st <- get
-  expandedArgs <- liftIO (expandGlobs (cwd st) args)
-  env0 <- liftIO Env.getEnvironment
-  let envMerged = Map.toList (envOverrides st) ++ env0
+  let envMap = effectiveEnvMap st
+  let name' = expandTextEnv envMap name
+  let args' = map (expandTextEnv envMap) args
+  expandedArgs <- liftIO (expandGlobs envMap (cwd st) args')
+  let envMerged = Map.toList envMap
   let cp =
-        (Proc.proc (T.unpack name) (map T.unpack expandedArgs))
+        (Proc.proc (T.unpack name') (map T.unpack expandedArgs))
           { Proc.cwd = Just (cwd st),
             Proc.env = Just envMerged
           }
@@ -285,8 +337,8 @@ runExternalCapture name args = do
 runViaSh :: (MonadIO m) => T.Text -> StateT ShellState m ()
 runViaSh cmdline = do
   st <- get
-  env0 <- liftIO Env.getEnvironment
-  let envMerged = Map.toList (envOverrides st) ++ env0
+  let envMap = effectiveEnvMap st
+  let envMerged = Map.toList envMap
   let cp =
         (Proc.proc "/bin/sh" ["-c", T.unpack cmdline])
           { Proc.cwd = Just (cwd st),
@@ -298,8 +350,8 @@ runViaSh cmdline = do
 runViaShCapture :: T.Text -> StateT ShellState IO T.Text
 runViaShCapture cmdline = do
   st <- get
-  env0 <- liftIO Env.getEnvironment
-  let envMerged = Map.toList (envOverrides st) ++ env0
+  let envMap = effectiveEnvMap st
+  let envMerged = Map.toList envMap
   let cp =
         (Proc.proc "/bin/sh" ["-c", T.unpack cmdline])
           { Proc.cwd = Just (cwd st),
@@ -323,8 +375,8 @@ runViaShCapture cmdline = do
 runViaShWithStdin :: (MonadIO m) => T.Text -> T.Text -> StateT ShellState m ()
 runViaShWithStdin stdinText cmdline = do
   st <- get
-  env0 <- liftIO Env.getEnvironment
-  let envMerged = Map.toList (envOverrides st) ++ env0
+  let envMap = effectiveEnvMap st
+  let envMerged = Map.toList envMap
   let cp =
         (Proc.proc "/bin/sh" ["-c", T.unpack cmdline])
           { Proc.cwd = Just (cwd st),
@@ -343,8 +395,8 @@ runViaShWithStdin stdinText cmdline = do
 runViaShWithStdinCapture :: T.Text -> T.Text -> StateT ShellState IO T.Text
 runViaShWithStdinCapture stdinText cmdline = do
   st <- get
-  env0 <- liftIO Env.getEnvironment
-  let envMerged = Map.toList (envOverrides st) ++ env0
+  let envMap = effectiveEnvMap st
+  let envMerged = Map.toList envMap
   let cp =
         (Proc.proc "/bin/sh" ["-c", T.unpack cmdline])
           { Proc.cwd = Just (cwd st),
@@ -374,12 +426,16 @@ runStructured seg = do
 structuredValueFor :: (MonadIO m) => Segment -> StateT ShellState m (StructuredValue, Exit.ExitCode)
 structuredValueFor seg = do
   st <- get
+  let envMap = effectiveEnvMap st
+  let args' = map (expandTextEnv envMap) (segArgs seg)
   let name = segName seg
   liftIO $
     case name of
       "ls" -> do
+        -- Filter out flags (arguments starting with -) and use first path, or cwd
+        let nonFlags = filter (not . T.isPrefixOf "-") args'
         let targetDir =
-              case segArgs seg of
+              case nonFlags of
                 (p : _) -> T.unpack p
                 _ -> cwd st
         v <- lsStructured targetDir
@@ -390,13 +446,12 @@ structuredValueFor seg = do
       _ -> do
         -- For now, treat unknown @commands as "capture external stdout".
         -- This enables: @cmd args | grep ...
-        externalToStructured (cwd st) (envOverrides st) name (segArgs seg)
+        externalToStructured (cwd st) envMap (expandTextEnv envMap name) args'
 
 externalToStructured :: FilePath -> Map.Map String String -> T.Text -> [T.Text] -> IO (StructuredValue, Exit.ExitCode)
-externalToStructured workingDir envOverrides0 name args = do
-  expandedArgs <- expandGlobs workingDir args
-  env0 <- Env.getEnvironment
-  let envMerged = Map.toList envOverrides0 ++ env0
+externalToStructured workingDir envMap name args = do
+  expandedArgs <- expandGlobs envMap workingDir args
+  let envMerged = Map.toList envMap
   let cp =
         (Proc.proc (T.unpack name) (map T.unpack expandedArgs))
           { Proc.cwd = Just workingDir,
@@ -427,16 +482,15 @@ isCommandNotFound msg =
   -- Heuristic: different platforms/RTS versions format this differently.
   T.isInfixOf "does not exist" msg || T.isInfixOf "No such file or directory" msg
 
-expandGlobs :: FilePath -> [T.Text] -> IO [T.Text]
-expandGlobs workingDir args = do
-  args1 <- mapM expandArgShorthands args
+expandGlobs :: Map.Map String String -> FilePath -> [T.Text] -> IO [T.Text]
+expandGlobs envMap workingDir args = do
+  let args1 = map (expandArgShorthands envMap) args
   fmap concat (mapM (expandOne workingDir) args1)
 
-expandArgShorthands :: T.Text -> IO T.Text
-expandArgShorthands t = do
-  p1 <- expandTilde (T.unpack t)
-  p2 <- expandEnvVars p1
-  pure (T.pack p2)
+expandArgShorthands :: Map.Map String String -> T.Text -> T.Text
+expandArgShorthands envMap t =
+  let p1 = expandTildeText envMap t
+   in expandTextEnv envMap p1
 
 expandOne :: FilePath -> T.Text -> IO [T.Text]
 expandOne workingDir arg
@@ -532,51 +586,93 @@ expandRanges = go
         else [b .. a] ++ go xs
     go (x : xs) = x : go xs
 
-resolveCdTarget :: Maybe FilePath -> IO FilePath
-resolveCdTarget mTarget =
+resolveCdTarget :: Map.Map String String -> Maybe FilePath -> IO FilePath
+resolveCdTarget envMap mTarget =
   case mTarget of
     Just p -> do
-      p1 <- expandTilde p
-      p2 <- expandEnvVars p1
+      let p1 = T.unpack (expandTildeText envMap (T.pack p))
+      let p2 = T.unpack (expandTextEnv envMap (T.pack p1))
       Dir.makeAbsolute p2
     Nothing -> do
-      mh <- Env.lookupEnv "HOME"
-      Dir.makeAbsolute (maybe "." id mh)
+      Dir.makeAbsolute (Map.findWithDefault "." "HOME" envMap)
 
-expandTilde :: FilePath -> IO FilePath
-expandTilde p =
-  case p of
-    "~" -> do
-      mh <- Env.lookupEnv "HOME"
-      pure (maybe "~" id mh)
-    ('~' : '/' : rest) -> do
-      mh <- Env.lookupEnv "HOME"
-      pure $
-        case mh of
-          Nothing -> p
-          Just h -> h FP.</> rest
-    _ -> pure p
+-- | Merge base env with overrides (overrides win).
+effectiveEnvMap :: ShellState -> Map.Map String String
+effectiveEnvMap st = Map.union (envOverrides st) (baseEnv st)
 
-expandEnvVars :: FilePath -> IO FilePath
-expandEnvVars p =
-  case p of
-    '$' : '{' : rest ->
-      case break (== '}') rest of
-        (var, '}' : after) -> do
-          mv <- Env.lookupEnv var
-          pure $
-            case mv of
-              Nothing -> p
-              Just v -> v <> after
-        _ -> pure p
-    '$' : rest -> do
-      let (var, after) = break (== '/') rest
-      if null var
-        then pure p
-        else do
-          mv <- Env.lookupEnv var
-          pure $
-            case mv of
-              Nothing -> p
-              Just v -> v <> after
-    _ -> pure p
+-- | Tilde expansion for arguments (only leading ~ forms).
+expandTildeText :: Map.Map String String -> T.Text -> T.Text
+expandTildeText envMap t =
+  case T.unpack t of
+    "~" -> T.pack (Map.findWithDefault "~" "HOME" envMap)
+    '~' : '/' : rest ->
+      case Map.lookup "HOME" envMap of
+        Nothing -> t
+        Just h -> T.pack (h FP.</> rest)
+    _ -> t
+
+-- | Expand $VAR and ${VAR} anywhere in the text.
+--
+-- This is intentionally minimal (no quoting/escape rules yet).
+expandTextEnv :: Map.Map String String -> T.Text -> T.Text
+expandTextEnv envMap = go
+  where
+    go s =
+      case T.breakOn "$" s of
+        (before, rest)
+          | T.null rest -> before
+          | otherwise ->
+              let afterDollar = T.drop 1 rest
+               in before <> expandVar afterDollar
+
+    expandVar s
+      | T.null s = "$"
+      | T.isPrefixOf "{" s =
+          case T.breakOn "}" (T.drop 1 s) of
+            (var, tail0)
+              | T.null tail0 -> "${" <> var
+              | otherwise ->
+                  let value = Map.findWithDefault ("${" <> T.unpack var <> "}") (T.unpack var) envMap
+                      rest = T.drop 1 tail0
+                   in T.pack value <> go rest
+      | otherwise =
+          let (var, rest) = T.span isVarChar s
+           in if T.null var
+                then "$" <> go s
+                else
+                  let value = Map.findWithDefault ("$" <> T.unpack var) (T.unpack var) envMap
+                   in T.pack value <> go rest
+
+    isVarChar c =
+      (c >= 'a' && c <= 'z')
+        || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9')
+        || c == '_'
+
+runExport :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
+runExport args = do
+  st <- get
+  let envMap = effectiveEnvMap st
+  case args of
+    [] -> liftIO $ mapM_ putKV (Map.toList envMap)
+    _ -> do
+      newOverrides <- foldl (step envMap) (pure (envOverrides st)) args
+      put st {envOverrides = newOverrides, lastExitCode = 0}
+  where
+    putKV (k, v) = TIO.hPutStrLn stderr (T.pack (k <> "=" <> v))
+
+    step :: (MonadIO m) => Map.Map String String -> m (Map.Map String String) -> T.Text -> m (Map.Map String String)
+    step envMap accM a = do
+      acc <- accM
+      let t = expandTextEnv envMap a
+      case T.breakOn "=" t of
+        (k, vEq)
+          | T.null vEq ->
+              -- export KEY: keep existing value if present, else set empty
+              let key = T.unpack (T.strip k)
+                  val = Map.findWithDefault "" key envMap
+               in pure (Map.insert key val acc)
+          | otherwise ->
+              let key = T.unpack (T.strip k)
+                  val = T.unpack (T.drop 1 vEq)
+               in pure (Map.insert key val acc)

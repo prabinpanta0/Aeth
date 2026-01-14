@@ -276,27 +276,50 @@ readKey = do
   where
     readEscape = do
       c1 <- getChar
-      if c1 /= '['
-        then pure KUnknown
-        else do
+      case c1 of
+        -- CSI
+        '[' -> readCsi
+        -- SS3 (common for Home/End on some terms): ESC O H / ESC O F
+        'O' -> do
           c2 <- getChar
           case c2 of
-            'A' -> pure KUp
-            'B' -> pure KDown
-            'D' -> pure KLeft
-            'C' -> pure KRight
             'H' -> pure KHome
             'F' -> pure KEnd
-            '3' -> do
-              _ <- getChar -- '~'
-              pure KDelete
-            '2' -> do
-              -- Possible bracketed paste start: ESC [ 200 ~
-              digits <- readDigitsUntilTilde
-              if digits == "00"
-                then KText <$> readBracketedPaste
-                else pure KUnknown
+            'A' -> pure KUp
+            'B' -> pure KDown
+            'C' -> pure KRight
+            'D' -> pure KLeft
             _ -> pure KUnknown
+        _ -> pure KUnknown
+
+    readCsi = do
+      c2 <- getChar
+      case c2 of
+        'A' -> pure KUp
+        'B' -> pure KDown
+        'D' -> pure KLeft
+        'C' -> pure KRight
+        'H' -> pure KHome
+        'F' -> pure KEnd
+        -- Delete: ESC [ 3 ~
+        '3' -> do
+          _ <- getChar -- '~'
+          pure KDelete
+        -- Bracketed paste: ESC [ 200 ~ ... ESC [ 201 ~
+        '2' -> do
+          digits <- readDigitsUntilTilde
+          case digits of
+            "00" -> KText <$> readBracketedPaste
+            "~" -> pure KUnknown
+            _ -> pure KUnknown
+        -- Home/End variants: ESC [ 1 ~ / ESC [ 4 ~
+        '1' -> do
+          _ <- getChar -- '~'
+          pure KHome
+        '4' -> do
+          _ <- getChar -- '~'
+          pure KEnd
+        _ -> pure KUnknown
 
     readDigitsUntilTilde :: IO String
     readDigitsUntilTilde = go []

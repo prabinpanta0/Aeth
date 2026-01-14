@@ -27,6 +27,7 @@ newtype Pipeline = Pipeline {unPipeline :: [Segment]}
 
 data ShellState = ShellState
   { cwd :: FilePath,
+    baseEnv :: Map.Map String String,
     envOverrides :: Map.Map String String,
     lastExitCode :: Int,
     lastDurationMs :: Maybe Int,
@@ -34,5 +35,13 @@ data ShellState = ShellState
   }
   deriving (Eq, Show)
 
-emptyShellState :: FilePath -> ShellState
-emptyShellState initialCwd = ShellState {cwd = initialCwd, envOverrides = Map.empty, lastExitCode = 0, lastDurationMs = Nothing, history = []}
+emptyShellState :: FilePath -> Map.Map String String -> ShellState
+emptyShellState initialCwd base =
+  ShellState
+    { cwd = initialCwd,
+      baseEnv = base,
+      envOverrides = Map.singleton "PWD" initialCwd,
+      lastExitCode = 0,
+      lastDurationMs = Nothing,
+      history = []
+    }
