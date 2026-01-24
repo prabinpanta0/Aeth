@@ -85,11 +85,39 @@ build:
 	cabal build all
 
 install: build
-	@echo "Installing $(PROJECT_NAME) to cabal's default location (likely ~/.cabal/bin or similar)..."
+	@echo "Installing $(PROJECT_NAME) to user binary directory..."
 	mkdir -p "$(INSTALL_DIR)"
 	@echo "DEBUG: INSTALL_DIR='$(INSTALL_DIR)'"
 	@echo "DEBUG: CABAL_EXE_NAME='$(CABAL_EXE_NAME)'"
 	cp $(shell find dist-newstyle -name $(CABAL_EXE_NAME) -type f) "$(INSTALL_DIR)/$(CABAL_EXE_NAME)"
+	@# Check if INSTALL_DIR is in PATH
+	@if ! echo "$$PATH" | grep -Fq "$(INSTALL_DIR)"; then \
+		echo "Warning: $(INSTALL_DIR) is not in your PATH."; \
+		SHELL_NAME=$$(basename "$$SHELL"); \
+		if [ "$$SHELL_NAME" = "zsh" ]; then \
+			RC_FILE="$(HOME)/.zshrc"; \
+		elif [ "$$SHELL_NAME" = "bash" ]; then \
+			RC_FILE="$(HOME)/.bashrc"; \
+		else \
+			RC_FILE="$(HOME)/.profile"; \
+		fi; \
+		if [ -f "$$RC_FILE" ]; then \
+			if grep -Fq "$(INSTALL_DIR)" "$$RC_FILE"; then \
+				echo "Note: The path seems to be in $$RC_FILE already, but is not active in the current session."; \
+				echo "Please run 'source $$RC_FILE' or restart your terminal."; \
+			else \
+				echo "Adding $(INSTALL_DIR) to $$RC_FILE..."; \
+				printf "\n# Added by Aeth Makefile\nexport PATH=\"$(INSTALL_DIR):\$$PATH\"\n" >> "$$RC_FILE"; \
+				echo "Success! Added to $$RC_FILE."; \
+				echo "IMPORTANT: Run 'source $$RC_FILE' or restart your terminal to use '$(CABAL_EXE_NAME)'."; \
+			fi; \
+		else \
+			echo "Could not find shell config file ($$RC_FILE)."; \
+			echo "Please manually add '$(INSTALL_DIR)' to your PATH."; \
+		fi; \
+	else \
+		echo "$(INSTALL_DIR) is already in your PATH."; \
+	fi
 
 uninstall:
 	@echo "Attempting to uninstall $(PROJECT_NAME)..."
