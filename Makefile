@@ -78,6 +78,10 @@ deps:
 
 build:
 	@echo "Building $(PROJECT_NAME)..."
+	@if [ ! -d "$(HOME)/.cabal/packages/hackage.haskell.org" ]; then \
+		echo "Package list not found. Running 'cabal update'..."; \
+		cabal update; \
+	fi
 	cabal build all
 
 install: build
