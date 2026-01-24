@@ -26,6 +26,29 @@ DISTRO := $(shell lsb_release -si 2>/dev/null || cat /etc/os-release | grep -E "
 # Convert to lowercase for easier matching
 DISTRO := $(shell echo $(DISTRO) | tr '[:upper:]' '[:lower:]')
 
+# --- Dependency Commands ---
+ifeq ($(DISTRO),ubuntu)
+    DEPS_CMD := sudo apt-get update && sudo apt-get install -y build-essential ghc cabal-install libvty-dev
+else ifeq ($(DISTRO),debian)
+    DEPS_CMD := sudo apt-get update && sudo apt-get install -y build-essential ghc cabal-install libvty-dev
+else ifeq ($(DISTRO),arch)
+    DEPS_CMD := sudo pacman -Syu --noconfirm base-devel ghc cabal-install vty
+else ifeq ($(DISTRO),fedora)
+    # dnf check-update returns 100 if updates are available, so we ignore the exit code
+    DEPS_CMD := sudo dnf check-update || true; sudo dnf install -y @development-tools ghc cabal-install ncurses-devel
+else ifeq ($(DISTRO),centos)
+    DEPS_CMD := sudo dnf check-update || true; sudo dnf install -y @development-tools ghc cabal-install ncurses-devel
+else ifeq ($(DISTRO),gentoo)
+    DEPS_CMD := sudo emerge --ask dev-lang/ghc dev-haskell/cabal-install sys-libs/ncurses
+else ifeq ($(DISTRO),nixos)
+    DEPS_CMD := @echo "NixOS detected. For NixOS, it's recommended to define a Nix expression for your project."; \
+                echo "This Makefile will not attempt to install system dependencies via Nix."; \
+                echo "You might need to use 'nix-shell -p ghc cabal-install' or create a default.nix file."
+else
+    DEPS_CMD := @echo "Unknown distribution: $(DISTRO). Please install 'ghc' and 'cabal-install' manually."; \
+                echo "You may also need development headers for ncurses or vty if you encounter build issues."
+endif
+
 # --- Targets ---
 
 all: build
@@ -47,39 +70,9 @@ deps:
 	@echo "Installing system dependencies for $(DISTRO)..."
 	@echo "This target requires sudo permissions."
 	@echo "Please enter your password if prompted."
-
-ifeq ($(DISTRO),ubuntu)
-deps:
-	sudo apt-get update
-	sudo apt-get install -y build-essential ghc cabal-install libvty-dev # libvty-dev might be needed for vty
-else ifeq ($(DISTRO),debian)
-deps:
-	sudo apt-get update
-	sudo apt-get install -y build-essential ghc cabal-install libvty-dev # libvty-dev might be needed for vty
-else ifeq ($(DISTRO),arch)
-deps:
-	sudo pacman -Syu --noconfirm base-devel ghc cabal-install vty # vty might be needed for vty
-else ifeq ($(DISTRO),fedora)
-deps:
-	sudo dnf check-update
-	sudo dnf install -y @development-tools ghc cabal-install ncurses-devel # ncurses-devel for vty
-else ifeq ($(DISTRO),centos)
-deps:
-	sudo dnf check-update
-	sudo dnf install -y @development-tools ghc cabal-install ncurses-devel # ncurses-devel for vty
-else ifeq ($(DISTRO),gentoo)
-deps:
-	sudo emerge --ask dev-lang/ghc dev-haskell/cabal-install sys-libs/ncurses # ncurses for vty
-else ifeq ($(DISTRO),nixos)
-deps:
-	@echo "NixOS detected. For NixOS, it's recommended to define a Nix expression for your project."
-	@echo "This Makefile will not attempt to install system dependencies via Nix."
-	@echo "You might need to use 'nix-shell -p ghc cabal-install' or create a default.nix file."
-else
-deps:
-	@echo "Unknown distribution: $(DISTRO). Please install 'ghc' and 'cabal-install' manually."
-	@echo "You may also need development headers for ncurses or vty if you encounter build issues."
-endif
+	$(DEPS_CMD)
+	@echo "Updating cabal package list..."
+	cabal update
 
 build:
 	@echo "Building $(PROJECT_NAME)..."
