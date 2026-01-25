@@ -1,13 +1,13 @@
 # Maintainer: prabinpanta0 <me@prabinpanta.com.np>
 pkgname=aeth-git
-pkgver=r18.0e121fc
+pkgver=r18.4e704c6
 pkgrel=1
 pkgdesc="An elegant polymorphic shell that lacks the concept of elegance. Written in Haskell."
 arch=('x86_64')
 url="https://github.com/prabinpanta0/Aeth"
 license=('MIT')
 depends=('gmp' 'ncurses' 'zlib' 'libffi')
-makedepends=('ghc' 'cabal-install' 'git')
+makedepends=('ghc' 'ghc-static' 'cabal-install' 'git')
 provides=('aeth')
 conflicts=('aeth')
 source=("${pkgname}::git+https://github.com/prabinpanta0/Aeth.git")
