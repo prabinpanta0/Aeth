@@ -30,10 +30,18 @@ build() {
   export HOME="$srcdir/home"
 
   cabal update
+  
+  # Prevent cabal from using Arch's broken dynamic-only system libraries for static builds
+  # We hide problematic packages so cabal identifies them as missing and rebuilds them statically from source
+  GHC_ARGS="-hide-package hashable -hide-package random -hide-package text -hide-package primitive -hide-package vector"
+  
   # Build with optimization and stripping
   # --disable-shared --enable-static ensures we build static libraries for dependencies
-  # preventing linking errors against Arch's dynamic-only system Haskell packages
-  cabal build --enable-executable-stripping --enable-split-sections --disable-shared --enable-static
+  cabal build --enable-executable-stripping \
+              --enable-split-sections \
+              --disable-shared \
+              --enable-static \
+              --ghc-options="$GHC_ARGS"
 }
 
 package() {
