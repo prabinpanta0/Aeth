@@ -48,6 +48,8 @@ package() {
 
   # Install Documentation and Example Config
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
-  install -Dm644 docs/*.md "$pkgdir/usr/share/doc/$pkgname/" 2>/dev/null || true
+  if compgen -G "docs/*.md" > /dev/null; then
+    install -Dm644 docs/*.md "$pkgdir/usr/share/doc/$pkgname/"
+  fi
   install -Dm644 config/config.toml "$pkgdir/usr/share/doc/$pkgname/examples/config.toml"
 }
