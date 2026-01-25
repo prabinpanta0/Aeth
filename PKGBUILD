@@ -31,7 +31,9 @@ build() {
 
   cabal update
   # Build with optimization and stripping
-  cabal build --enable-executable-stripping --enable-split-sections
+  # --disable-shared --enable-static ensures we build static libraries for dependencies
+  # preventing linking errors against Arch's dynamic-only system Haskell packages
+  cabal build --enable-executable-stripping --enable-split-sections --disable-shared --enable-static
 }
 
 package() {
