@@ -8,7 +8,7 @@
 #   make help          - Display this help message.
 #   make deps          - Install system-level dependencies (GHC, Cabal) for your distribution.
 #   make build         - Build the Aeth project.
-#   make install       - Install the Aeth executable to ~/.local/bin (or where cabal puts it).
+#   make install       - Install the Aeth executable to $(PREFIX)/bin.
 #   make uninstall     - Uninstall the Aeth executable.
 #   make run           - Run the Aeth project.
 #   make clean         - Clean build artifacts.
@@ -18,7 +18,9 @@
 # --- Configuration ---
 PROJECT_NAME := Aeth
 CABAL_EXE_NAME := $(strip Aeth)# As defined in aeth.cabal
-INSTALL_DIR := $(strip $(HOME)/.local/bin)# Default installation directory for user binaries
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+# DESTDIR is used by packaging tools
 
 # --- Distribution Detection ---
 # Try to detect the distribution using lsb_release or /etc/os-release
@@ -58,7 +60,7 @@ help:
 	@echo "  make help          - Display this help message."
 	@echo "  make deps          - Install system-level dependencies (GHC, Cabal) for your distribution."
 	@echo "  make build         - Build the Aeth project."
-	@echo "  make install       - Install the Aeth executable to $(INSTALL_DIR) (or where cabal puts it)."
+	@echo "  make install       - Install the Aeth executable to $(BINDIR)."
 	@echo "  make uninstall     - Uninstall the Aeth executable."
 	@echo "  make run           - Run the Aeth project."
 	@echo "  make clean         - Clean build artifacts."
@@ -85,48 +87,17 @@ build:
 	cabal build all
 
 install: build
-	@echo "Installing $(PROJECT_NAME) to user binary directory..."
-	mkdir -p "$(INSTALL_DIR)"
-	@echo "DEBUG: INSTALL_DIR='$(INSTALL_DIR)'"
-	@echo "DEBUG: CABAL_EXE_NAME='$(CABAL_EXE_NAME)'"
-	cp $(shell find dist-newstyle -name $(CABAL_EXE_NAME) -type f) "$(INSTALL_DIR)/$(CABAL_EXE_NAME)"
-	@# Check if INSTALL_DIR is in PATH
-	@if ! echo "$$PATH" | grep -Fq "$(INSTALL_DIR)"; then \
-		echo "Warning: $(INSTALL_DIR) is not in your PATH."; \
-		SHELL_NAME=$$(basename "$$SHELL"); \
-		if [ "$$SHELL_NAME" = "zsh" ]; then \
-			RC_FILE="$(HOME)/.zshrc"; \
-		elif [ "$$SHELL_NAME" = "bash" ]; then \
-			RC_FILE="$(HOME)/.bashrc"; \
-		else \
-			RC_FILE="$(HOME)/.profile"; \
-		fi; \
-		if [ -f "$$RC_FILE" ]; then \
-			if grep -Fq "$(INSTALL_DIR)" "$$RC_FILE"; then \
-				echo "Note: The path seems to be in $$RC_FILE already, but is not active in the current session."; \
-				echo "Please run 'source $$RC_FILE' or restart your terminal."; \
-			else \
-				echo "Adding $(INSTALL_DIR) to $$RC_FILE..."; \
-				printf "\n# Added by Aeth Makefile\nexport PATH=\"$(INSTALL_DIR):\$$PATH\"\n" >> "$$RC_FILE"; \
-				echo "Success! Added to $$RC_FILE."; \
-				echo "IMPORTANT: Run 'source $$RC_FILE' or restart your terminal to use '$(CABAL_EXE_NAME)'."; \
-			fi; \
-		else \
-			echo "Could not find shell config file ($$RC_FILE)."; \
-			echo "Please manually add '$(INSTALL_DIR)' to your PATH."; \
-		fi; \
-	else \
-		echo "$(INSTALL_DIR) is already in your PATH."; \
-	fi
+	@echo "Installing $(PROJECT_NAME) to $(DESTDIR)$(BINDIR)..."
+	mkdir -p "$(DESTDIR)$(BINDIR)"
+	$(eval EXE_PATH := $(shell find dist-newstyle -type f -name $(CABAL_EXE_NAME) -executable | grep -v "\-tmp" | head -n 1))
+	@if [ -z "$(EXE_PATH)" ]; then echo "Error: Could not find executable. Run 'make build' first."; exit 1; fi
+	install -Dm755 "$(EXE_PATH)" "$(DESTDIR)$(BINDIR)/$(PROJECT_NAME)"
+	@echo "Installation successful."
 
 uninstall:
-	@echo "Attempting to uninstall $(PROJECT_NAME)..."
-	@echo "Note: Cabal does not have a direct 'uninstall' command."
-	@echo "This target will try to remove the installed executable from common locations."
-	@echo "You may also need to manually remove the package from your cabal store if you no longer need it."
-	-rm -f $(INSTALL_DIR)/$(CABAL_EXE_NAME)
-	-rm -f $(HOME)/.cabal/bin/$(CABAL_EXE_NAME) # Cabal's default for user installs
-	@echo "If $(PROJECT_NAME) was installed system-wide (e.g., /usr/local/bin), you might need to remove it manually with 'sudo rm /usr/local/bin/$(CABAL_EXE_NAME)'."
+	@echo "Uninstalling $(PROJECT_NAME)..."
+	rm -f "$(DESTDIR)$(BINDIR)/$(PROJECT_NAME)"
+	@echo "Uninstallation successful."
 
 run: build
 	@echo "Running $(PROJECT_NAME)..."
