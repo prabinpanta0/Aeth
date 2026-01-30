@@ -9,6 +9,7 @@
 -- - Proper signal handling
 -- - Tab completion
 -- - Terminal state properly restored on exit
+-- - Syntax highlighting and auto-suggestions via LineEditor
 module Aeth.ShellFast
   ( run,
     runCommandLine,
@@ -17,6 +18,7 @@ where
 
 import Aeth.ConfigFast
 import Aeth.Exec
+import qualified Aeth.LineEditor as LE
 import Aeth.Parse
 import Aeth.Types
 import Control.Exception (IOException, catch)
@@ -59,16 +61,27 @@ run = do
   (cfg, mCfgErr) <- loadConfig
   case mCfgErr of
     Nothing -> pure ()
-    Just e -> TIO.hPutStrLn stderr ("Aeth: " <> T.pack e)
+    Just e -> TIO.hPutStrLn stderr ("aeth: " <> T.pack e)
 
-  -- Run the shell with haskeline
+  -- Source rc file
+  runStartup cfg st0
+
+  -- Choose the appropriate line editor based on config
+  if syntaxHighlighting cfg || autoSuggestions cfg
+    then runWithLineEditor cfg -- Use custom LineEditor with highlighting
+    else runWithHaskeline cfg -- Use haskeline for basic input
+
+-- | Run shell with the custom LineEditor (syntax highlighting + auto-suggestions)
+runWithLineEditor :: ShellConfig -> IO ()
+runWithLineEditor cfg =
+  LE.withLineEditor $ \ed -> mainLoopLE ed cfg
+
+-- | Run shell with haskeline (basic input, good for compatibility)
+runWithHaskeline :: ShellConfig -> IO ()
+runWithHaskeline cfg = do
   histPath <- historyFilePath
   let hlSettings = makeHaskelineSettings cfg histPath
-  HL.runInputT hlSettings $ do
-    -- Source rc file
-    liftIO $ runStartup cfg st0
-    -- Enter main loop
-    mainLoop cfg
+  HL.runInputT hlSettings $ mainLoop cfg
 
 -- | Run a single command (for -c flag)
 runCommandLine :: String -> IO ()
@@ -79,7 +92,7 @@ runCommandLine line = do
   (cfg, errs) <- loadConfig
   -- Surface config errors to stderr
   case errs of
-    Just err -> TIO.hPutStrLn stderr ("Aeth: config: " <> T.pack err)
+    Just err -> TIO.hPutStrLn stderr ("aeth: config: " <> T.pack err)
     Nothing -> pure ()
   evalStateT (runOne cfg (T.pack line)) st0
 
@@ -211,6 +224,36 @@ mainLoop cfg = go
           liftIO $ runLineWithState line cfg
           go
 
+-- | Main loop with LineEditor (syntax highlighting + auto-suggestions)
+mainLoopLE :: LE.LineEditor -> ShellConfig -> IO ()
+mainLoopLE ed cfg = go
+  where
+    go = do
+      -- Get current state
+      st <- readIORef globalStateRef
+
+      -- Generate prompt
+      promptStr <- mkPromptFunction cfg st
+
+      -- Get input with syntax highlighting
+      mInput <- LE.getLineEdited ed [] promptStr (history st)
+      case mInput of
+        Nothing -> return () -- EOF (Ctrl+D)
+        Just "" -> go -- Empty line
+        Just line -> do
+          -- Append to history file
+          appendHistory line
+          -- Update internal history for shell access
+          modifyIORef' globalStateRef (\s -> s {history = history s ++ [line]})
+
+          -- Execute
+          runLineWithState line cfg
+          go
+
+          -- Execute
+          liftIO $ runLineWithState line cfg
+          go
+
 -- | Run a line and update global state
 runLineWithState :: String -> ShellConfig -> IO ()
 runLineWithState line cfg = do
@@ -240,16 +283,16 @@ runStartup cfg st0 = do
 -- | Execute a single command/pipeline
 runOne :: (MonadIO m) => ShellConfig -> T.Text -> StateT ShellState m ()
 runOne cfg t =
-  case parsePipeline t of
+  case parseCommandList t of
     Left e ->
       if e == "empty"
         then pure ()
         else do
           modify' (\st -> st {lastExitCode = 2, lastDurationMs = Nothing})
-          liftIO $ TIO.hPutStrLn stderr ("Aeth: parse: " <> T.pack e)
-    Right p -> do
+          liftIO $ TIO.hPutStrLn stderr ("aeth: parse: " <> T.pack e)
+    Right cl -> do
       start <- liftIO getCurrentTime
-      runPipeline (aliases cfg) p
+      runCommandList (aliases cfg) cl
       end <- liftIO getCurrentTime
       let ms = max 0 (floor (realToFrac (diffUTCTime end start) * (1000 :: Double)) :: Int)
       modify' (\st -> st {lastDurationMs = Just ms})

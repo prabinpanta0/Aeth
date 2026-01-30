@@ -22,8 +22,10 @@ import System.Console.ANSI
     cursorDownLine,
     cursorUpLine,
     getTerminalSize,
+    hideCursor,
     setCursorColumn,
     setSGR,
+    showCursor,
   )
 import System.IO (BufferMode (NoBuffering), hFlush, hSetBuffering, hSetEcho, stdin, stdout)
 import qualified System.Posix.IO as PIO
@@ -116,6 +118,8 @@ getLineEdited _ _scrollback prompt history0 =
 
     render :: String -> Int -> Int -> IO Int
     render buf cursor prevLines = do
+      -- Hide cursor during re-render to prevent flickering/blinking
+      hideCursor
       -- Clear the previously-rendered wrapped lines.
       when (prevLines > 0) $ do
         _ <- cursorUpLine prevLines
@@ -162,6 +166,8 @@ getLineEdited _ _scrollback prompt history0 =
         _ <- cursorUpLine upBy
         pure ()
       setCursorColumn cursorCol
+      -- Show cursor now that it's positioned correctly
+      showCursor
       hFlush stdout
       pure endRow
 
@@ -203,14 +209,34 @@ renderHighlighted t = mapM_ renderTok (lexTokens t)
       setSGR [SetColor Foreground Vivid Yellow]
       putStr (T.unpack s)
       setSGR [Reset]
+    renderTok (TokOperator s) = do
+      setSGR [SetColor Foreground Vivid Yellow, SetConsoleIntensity BoldIntensity]
+      putStr (T.unpack s)
+      setSGR [Reset]
     renderTok (TokCmd s) = do
       let str = T.unpack s
       if "@" `isPrefixOf` str
-        then setSGR [SetColor Foreground Vivid Green]
-        else setSGR [SetColor Foreground Vivid Cyan]
+        then setSGR [SetColor Foreground Vivid Green, SetConsoleIntensity BoldIntensity]
+        else setSGR [SetColor Foreground Vivid Cyan, SetConsoleIntensity BoldIntensity]
       putStr str
       setSGR [Reset]
     renderTok (TokArg s) = setSGR [Reset] >> putStr (T.unpack s)
+    renderTok (TokString s) = do
+      setSGR [SetColor Foreground Vivid Green]
+      putStr (T.unpack s)
+      setSGR [Reset]
+    renderTok (TokEnvVar s) = do
+      setSGR [SetColor Foreground Vivid Red]
+      putStr (T.unpack s)
+      setSGR [Reset]
+    renderTok (TokRedirect s) = do
+      setSGR [SetColor Foreground Vivid Magenta]
+      putStr (T.unpack s)
+      setSGR [Reset]
+    renderTok (TokPath s) = do
+      setSGR [SetColor Foreground Dull Cyan]
+      putStr (T.unpack s)
+      setSGR [Reset]
 
 suggestion :: String -> [String] -> Maybe String
 suggestion prefix hs
@@ -222,9 +248,16 @@ suggestion prefix hs
 
 data Tok
   = TokPipe T.Text
+  | -- | and ||
+    TokOperator T.Text -- &&, ;, &
   | TokSpace T.Text
-  | TokCmd T.Text
-  | TokArg T.Text
+  | TokCmd T.Text -- Commands (first word)
+  | TokArg T.Text -- Normal arguments
+  | TokString T.Text -- Quoted strings
+  | TokEnvVar T.Text
+  | -- \$VAR or ${VAR}
+    TokRedirect T.Text -- <, >, >>, 2>
+  | TokPath T.Text -- Paths starting with / or ./
 
 lexTokens :: T.Text -> [Tok]
 lexTokens = go True
@@ -232,18 +265,92 @@ lexTokens = go True
     go _ s | T.null s = []
     go isCmdPos s =
       case T.uncons s of
-        Just ('|', rest) -> TokPipe "|" : go True rest
+        -- Operators: && || ;
+        Just ('&', rest)
+          | Just ('&', rest2) <- T.uncons rest -> TokOperator "&&" : go True rest2
+          | otherwise -> TokOperator "&" : go True rest
+        Just (';', rest) -> TokOperator ";" : go True rest
+        Just ('|', rest)
+          | Just ('|', rest2) <- T.uncons rest -> TokPipe "||" : go True rest2
+          | otherwise -> TokPipe "|" : go True rest
+        -- Redirections: >> > < 2> 2>&1
+        Just ('>', rest)
+          | Just ('>', rest2) <- T.uncons rest -> TokRedirect ">>" : go isCmdPos rest2
+          | otherwise -> TokRedirect ">" : go isCmdPos rest
+        Just ('<', rest) -> TokRedirect "<" : go isCmdPos rest
+        Just ('2', rest)
+          | Just ('>', rest2) <- T.uncons rest ->
+              case T.uncons rest2 of
+                Just ('&', rest3) -> case T.uncons rest3 of
+                  Just ('1', rest4) -> TokRedirect "2>&1" : go isCmdPos rest4
+                  _ -> TokRedirect "2>" : go isCmdPos rest2
+                _ -> TokRedirect "2>" : go isCmdPos rest2
+          | otherwise ->
+              let (w, rest') = breakToken s
+                  tok = if isCmdPos then TokCmd w else TokArg w
+               in tok : go False rest'
+        -- Environment variables: $VAR or ${VAR}
+        Just ('$', rest) ->
+          let (var, rest2) = parseEnvVar rest
+           in TokEnvVar (T.cons '$' var) : go isCmdPos rest2
+        -- Quoted strings
+        Just ('"', _) ->
+          let (quoted, rest2) = parseQuoted '"' s
+           in TokString quoted : go isCmdPos rest2
+        Just ('\'', _) ->
+          let (quoted, rest2) = parseQuoted '\'' s
+           in TokString quoted : go isCmdPos rest2
+        -- Whitespace
         Just (c, _)
           | isSpace c ->
               let (sp, rest) = T.span isSpace s
                in TokSpace sp : go isCmdPos rest
+        -- Commands and arguments
         _ ->
           let (w, rest) = breakToken s
-              tok = if isCmdPos then TokCmd w else TokArg w
+              tok
+                | isCmdPos = TokCmd w
+                | isPath w = TokPath w
+                | otherwise = TokArg w
            in tok : go False rest
 
+    -- Check if text looks like a path
+    isPath :: T.Text -> Bool
+    isPath t = case T.uncons t of
+      Just ('/', _) -> True
+      Just ('.', rest) -> case T.uncons rest of
+        Just ('/', _) -> True
+        _ -> False
+      Just ('~', _) -> True
+      _ -> False
+
+    -- Parse environment variable name
+    parseEnvVar :: T.Text -> (T.Text, T.Text)
+    parseEnvVar t = case T.uncons t of
+      Just ('{', rest) ->
+        let (name, rest2) = T.break (== '}') rest
+         in case T.uncons rest2 of
+              Just ('}', rest3) -> (T.cons '{' (T.snoc name '}'), rest3)
+              _ -> (T.cons '{' name, rest2)
+      _ -> T.span isVarChar t
+
+    isVarChar c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+
+    -- Parse quoted string including the quotes
+    parseQuoted :: Char -> T.Text -> (T.Text, T.Text)
+    parseQuoted q t = go' (T.unpack t) []
+      where
+        go' [] acc = (T.pack (reverse acc), T.empty)
+        go' (c : cs) acc
+          | c == q && null acc = go' cs [c] -- Opening quote
+          | c == '\\' = case cs of
+              (c2 : cs') -> go' cs' (c2 : '\\' : acc)
+              [] -> (T.pack (reverse (c : acc)), T.empty)
+          | c == q = (T.pack (reverse (c : acc)), T.pack cs) -- Closing quote
+          | otherwise = go' cs (c : acc)
+
     breakToken :: T.Text -> (T.Text, T.Text)
-    breakToken = T.break (\c -> isSpace c || c == '|')
+    breakToken = T.break (\c -> isSpace c || c `elem` ("|&;<>\"'" :: String))
 
 data Key
   = KChar Char

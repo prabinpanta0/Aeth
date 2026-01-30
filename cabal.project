@@ -1,1 +1,17 @@
 packages: .
+
+-- Tell Cabal to rebuild hashable, random, splitmix, os-string from Hackage
+-- instead of using the broken system packages (missing .hi files)
+-- The "build-depends" style forces fresh builds by requiring different versions
+allow-newer: 
+  hashable,
+  random, 
+  splitmix,
+  os-string
+
+-- Force specific versions that aren't in system package DB
+constraints:
+  hashable == 1.5.0.0,
+  random == 1.2.1.2,
+  splitmix == 0.1.0.5,
+  os-string == 2.0.6

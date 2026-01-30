@@ -4,6 +4,8 @@
 module Aeth.Exec
   ( runPipeline,
     runPipelineCapture,
+    runCommandList,
+    runCommandListCapture,
   )
 where
 
@@ -23,6 +25,8 @@ import qualified System.Directory as Dir
 import qualified System.Exit as Exit
 import qualified System.FilePath as FP
 import System.IO (hClose, stderr)
+import System.Posix.Process (getProcessStatus)
+import System.Posix.Signals (sigCONT, signalProcess)
 import qualified System.Process as Proc
 
 -- | Shared list of shell builtin commands
@@ -42,7 +46,9 @@ shellBuiltins =
     "echo",
     "true",
     "false",
-    "jobs"
+    "jobs",
+    "fg",
+    "bg"
   ]
 
 exitCodeToInt :: Exit.ExitCode -> Int
@@ -90,6 +96,49 @@ runPipelineCapture (Pipeline segments) =
     [] -> pure ""
     [seg] -> runSingleCapture seg
     _ -> runMultiCapture segments
+
+-- | Run a command list, handling &&, ||, ; operators
+runCommandList :: (MonadIO m) => AliasMap -> CommandList -> StateT ShellState m ()
+runCommandList aliasMap (CommandList parts) = go parts
+  where
+    go [] = pure ()
+    go ((pipeline, mOp) : rest) = do
+      runPipeline aliasMap pipeline
+      st <- get
+      let exitCode = lastExitCode st
+      case mOp of
+        Nothing -> pure () -- Last command, done
+        Just OpSeq -> go rest -- ; always continues
+        Just OpAnd ->
+          if exitCode == 0
+            then go rest -- && continues only on success
+            else pure ()
+        Just OpOr ->
+          if exitCode /= 0
+            then go rest
+            -- \|| continues only on failure
+            else pure ()
+
+-- | Like 'runCommandList' but captures output
+runCommandListCapture :: CommandList -> StateT ShellState IO T.Text
+runCommandListCapture (CommandList parts) = go parts []
+  where
+    go [] acc = pure (T.intercalate "\n" (filter (not . T.null) acc))
+    go ((pipeline, mOp) : rest) acc = do
+      out <- runPipelineCapture pipeline
+      st <- get
+      let exitCode = lastExitCode st
+      case mOp of
+        Nothing -> pure (T.intercalate "\n" (filter (not . T.null) (acc ++ [out])))
+        Just OpSeq -> go rest (acc ++ [out])
+        Just OpAnd ->
+          if exitCode == 0
+            then go rest (acc ++ [out])
+            else pure (T.intercalate "\n" (filter (not . T.null) (acc ++ [out])))
+        Just OpOr ->
+          if exitCode /= 0
+            then go rest (acc ++ [out])
+            else pure (T.intercalate "\n" (filter (not . T.null) (acc ++ [out])))
 
 runSingle :: (MonadIO m) => Segment -> StateT ShellState m ()
 runSingle seg =
@@ -205,16 +254,16 @@ structuredApply seg input =
     "filter" -> do
       let expr = T.unwords (segArgs seg)
       case filterStructured expr input of
-        Left e -> pure (SText ("Aeth: " <> e), Exit.ExitFailure 2)
+        Left e -> pure (SText ("aeth: " <> e), Exit.ExitFailure 2)
         Right out -> pure (out, Exit.ExitSuccess)
     "sort" -> do
       let col = T.unwords (segArgs seg)
       case sortStructured col input of
-        Left e -> pure (SText ("Aeth: " <> e), Exit.ExitFailure 2)
+        Left e -> pure (SText ("aeth: " <> e), Exit.ExitFailure 2)
         Right out -> pure (out, Exit.ExitSuccess)
     "select" -> do
       case selectStructured (segArgs seg) input of
-        Left e -> pure (SText ("Aeth: " <> e), Exit.ExitFailure 2)
+        Left e -> pure (SText ("aeth: " <> e), Exit.ExitFailure 2)
         Right out -> pure (out, Exit.ExitSuccess)
     _ -> do
       -- Fallback: run as external command that consumes rendered input and captures stdout.
@@ -235,7 +284,7 @@ externalToStructuredStdin workingDir envMap name args stdinText = do
           }
   result <- try (Proc.readCreateProcessWithExitCode cp (T.unpack stdinText)) :: IO (Either IOException (Exit.ExitCode, String, String))
   case result of
-    Left e -> pure (SText ("Aeth: " <> renderExecException name e), Exit.ExitFailure 127)
+    Left e -> pure (SText ("aeth: " <> renderExecException name e), Exit.ExitFailure 127)
     Right (ec, out, err) ->
       case ec of
         Exit.ExitSuccess -> pure (SText (T.pack out), ec)
@@ -291,85 +340,107 @@ runRawSingle :: (MonadIO m) => Segment -> StateT ShellState m ()
 runRawSingle seg = do
   let name = segName seg
   let args = segArgs seg
-  if name == ""
-    then pure ()
-    else case name of
-      "exit" -> liftIO (Exit.exitWith Exit.ExitSuccess)
-      "export" -> runExport args
-      "unset" -> runUnset args
-      "pwd" -> runPwd
-      "history" -> runHistory
-      "clear" -> liftIO $ do
-        putStr "\ESC[H\ESC[2J\ESC[3J" -- ANSI clear screen + scrollback
-      "source" -> runSource args
-      "." -> runSource args -- POSIX alias for source
-      "type" -> runType args
-      "which" -> runWhich args
-      "echo" -> runEcho args
-      "true" -> setLastExit Exit.ExitSuccess
-      "false" -> setLastExit (Exit.ExitFailure 1)
-      "jobs" -> runJobs
-      "cd" -> do
-        st <- get
-        let envMap = effectiveEnvMap st
-        -- Handle "cd -" specially: error if OLDPWD not set
-        case args of
-          ("-" : _) ->
-            case Map.lookup "OLDPWD" envMap of
-              Nothing -> do
-                liftIO (hPutShellError "cd: OLDPWD not set")
-                put st {lastExitCode = 1}
-              Just oldpwd -> doCd st envMap (Just oldpwd)
-          [] -> doCd st envMap Nothing
-          (p : _) -> doCd st envMap (Just (T.unpack (expandTextEnv envMap p)))
-      _ ->
-        if shouldUseShSegment seg
-          then do
-            -- Delegate complex shell syntax to /bin/sh for compatibility.
-            -- Note: this does not persist any env changes back into Aeth state.
-            let cmdline = renderRawSegment seg
-            runViaSh cmdline
-          else runExternal name args
+  -- Check for shell operators first; if present, delegate to /bin/sh so that
+  -- commands like "cd app && ls" work correctly.
+  if shouldUseShSegment seg
+    then do
+      let cmdline = renderRawSegment seg
+      runViaSh cmdline
+    else
+      if name == ""
+        then pure ()
+        else case name of
+          "exit" -> liftIO (Exit.exitWith Exit.ExitSuccess)
+          "export" -> runExport args
+          "unset" -> runUnset args
+          "pwd" -> runPwd
+          "history" -> runHistory
+          "clear" -> liftIO $ do
+            putStr "\ESC[H\ESC[2J\ESC[3J" -- ANSI clear screen + scrollback
+          "source" -> runSource args
+          "." -> runSource args -- POSIX alias for source
+          "type" -> runType args
+          "which" -> runWhich args
+          "echo" -> runEcho args
+          "true" -> setLastExit Exit.ExitSuccess
+          "false" -> setLastExit (Exit.ExitFailure 1)
+          "jobs" -> runJobs
+          "fg" -> runFg args
+          "bg" -> runBg args
+          "cd" -> do
+            st <- get
+            let envMap = effectiveEnvMap st
+            -- Handle "cd -" specially: error if OLDPWD not set
+            case args of
+              ("-" : _) ->
+                case Map.lookup "OLDPWD" envMap of
+                  Nothing -> do
+                    liftIO (hPutShellError "cd: OLDPWD not set")
+                    put st {lastExitCode = 1}
+                  Just oldpwd -> doCd st envMap (Just oldpwd)
+              [] -> doCd st envMap Nothing
+              (p : _) -> doCd st envMap (Just (T.unpack (expandTextEnv envMap p)))
+          _ -> runExternal name args
 
 runRawSingleCapture :: Segment -> StateT ShellState IO T.Text
 runRawSingleCapture seg = do
   let name = segName seg
   let args = segArgs seg
-  if name == ""
-    then pure ""
-    else case name of
-      "exit" -> liftIO (Exit.exitWith Exit.ExitSuccess)
-      "export" -> do
-        runExport args
-        pure ""
-      "cd" -> do
-        st <- get
-        let envMap = effectiveEnvMap st
-        -- Handle "cd -" specially: error if OLDPWD not set
-        case args of
-          ("-" : _) ->
-            case Map.lookup "OLDPWD" envMap of
-              Nothing -> do
-                put st {lastExitCode = 1}
-                pure "cd: OLDPWD not set"
-              Just oldpwd -> doCdCapture st envMap (Just oldpwd)
-          [] -> doCdCapture st envMap Nothing
-          (p : _) -> doCdCapture st envMap (Just (T.unpack (expandTextEnv envMap p)))
-      _ ->
-        if shouldUseShSegment seg
-          then runViaShCapture (renderRawSegment seg)
-          else runExternalCapture name args
+  -- Check for shell operators first; if present, delegate to /bin/sh so that
+  -- commands like "cd app && ls" work correctly.
+  if shouldUseShSegment seg
+    then runViaShCapture (renderRawSegment seg)
+    else
+      if name == ""
+        then pure ""
+        else case name of
+          "exit" -> liftIO (Exit.exitWith Exit.ExitSuccess)
+          "export" -> do
+            runExport args
+            pure ""
+          "cd" -> do
+            st <- get
+            let envMap = effectiveEnvMap st
+            -- Handle "cd -" specially: error if OLDPWD not set
+            case args of
+              ("-" : _) ->
+                case Map.lookup "OLDPWD" envMap of
+                  Nothing -> do
+                    put st {lastExitCode = 1}
+                    pure "cd: OLDPWD not set"
+                  Just oldpwd -> doCdCapture st envMap (Just oldpwd)
+              [] -> doCdCapture st envMap Nothing
+              (p : _) -> doCdCapture st envMap (Just (T.unpack (expandTextEnv envMap p)))
+          _ -> runExternalCapture name args
 
 renderRawSegment :: Segment -> T.Text
-renderRawSegment s = T.unwords (segName s : segArgs s)
+renderRawSegment s =
+  let base = T.unwords (segName s : segArgs s)
+      redirs = T.concat (map renderRedirection (segRedirects s))
+      bg = if segBackground s then " &" else ""
+   in base <> redirs <> bg
+
+-- | Render a redirection for shell delegation
+renderRedirection :: Redirection -> T.Text
+renderRedirection r =
+  case redirType r of
+    RedirectIn -> " < " <> redirTarget r
+    RedirectOut -> " > " <> redirTarget r
+    RedirectAppend -> " >> " <> redirTarget r
+    RedirectErr -> " 2> " <> redirTarget r
+    RedirectErrAppend -> " 2>> " <> redirTarget r
+    RedirectErrToOut -> " 2>&1"
+    RedirectOutAndErr -> " &> " <> redirTarget r
 
 shouldUseShSegment :: Segment -> Bool
 shouldUseShSegment s =
-  let cmd = renderRawSegment s
-   in T.any (`elem` (";&><()\\`" :: String)) cmd
-        || T.isInfixOf "&&" cmd
-        || T.isInfixOf "||" cmd
-        || T.isInfixOf "|&" cmd
+  -- Use /bin/sh for complex shell syntax or when redirections are present
+  -- Note: &&, ||, ; are now handled at command list level, not here
+  not (null (segRedirects s))
+    || segBackground s
+    || let cmd = renderRawSegment s
+        in T.any (`elem` ("><()\\`" :: String)) cmd
+             || T.isInfixOf "|&" cmd
 
 runExternal :: (MonadIO m) => T.Text -> [T.Text] -> StateT ShellState m ()
 runExternal name args = do
@@ -410,7 +481,7 @@ runExternalCapture name args = do
   case result of
     Left e -> do
       put st {lastExitCode = 127}
-      pure ("Aeth: " <> renderExecException name e)
+      pure ("aeth: " <> renderExecException name e)
     Right (ec, out, err) -> do
       setLastExit ec
       let outT = T.pack out
@@ -418,7 +489,7 @@ runExternalCapture name args = do
           extra =
             if ec == Exit.ExitSuccess
               then ""
-              else "\n" <> "Aeth: exit: " <> T.pack (show ec)
+              else "\n" <> "aeth: exit: " <> T.pack (show ec)
           merged =
             T.stripEnd (outT <> (if T.null errT then "" else if T.null outT then errT else "\n" <> errT) <> extra)
       pure merged
@@ -450,7 +521,7 @@ runViaShCapture cmdline = do
   case result of
     Left e -> do
       put st {lastExitCode = 127}
-      pure ("Aeth: " <> T.pack (show e))
+      pure ("aeth: " <> T.pack (show e))
     Right (ec, out, err) -> do
       setLastExit ec
       let outT = T.pack out
@@ -458,7 +529,7 @@ runViaShCapture cmdline = do
           extra =
             if ec == Exit.ExitSuccess
               then ""
-              else "\n" <> "Aeth: exit: " <> T.pack (show ec)
+              else "\n" <> "aeth: exit: " <> T.pack (show ec)
       pure (T.stripEnd (outT <> (if T.null errT then "" else if T.null outT then errT else "\n" <> errT) <> extra))
 
 runViaShWithStdin :: (MonadIO m) => T.Text -> T.Text -> StateT ShellState m ()
@@ -495,7 +566,7 @@ runViaShWithStdinCapture stdinText cmdline = do
   case result of
     Left e -> do
       put st {lastExitCode = 127}
-      pure ("Aeth: " <> T.pack (show e))
+      pure ("aeth: " <> T.pack (show e))
     Right (ec, outS, errS) -> do
       setLastExit ec
       let outT = T.pack outS
@@ -503,7 +574,7 @@ runViaShWithStdinCapture stdinText cmdline = do
           extra =
             if ec == Exit.ExitSuccess
               then ""
-              else "\n" <> "Aeth: exit: " <> T.pack (show ec)
+              else "\n" <> "aeth: exit: " <> T.pack (show ec)
       pure (T.stripEnd (outT <> (if T.null errT then "" else if T.null outT then errT else "\n" <> errT) <> extra))
 
 runStructured :: (MonadIO m) => Segment -> StateT ShellState m ()
@@ -562,7 +633,7 @@ externalToStructured workingDir envMap name args = do
   -- readCreateProcessWithExitCode captures stdout/stderr (good enough for now).
   result <- try (Proc.readCreateProcessWithExitCode cp "") :: IO (Either IOException (Exit.ExitCode, String, String))
   case result of
-    Left e -> pure (SText ("Aeth: " <> renderExecException name e), Exit.ExitFailure 127)
+    Left e -> pure (SText ("aeth: " <> renderExecException name e), Exit.ExitFailure 127)
     Right (ec, out, err) ->
       case ec of
         Exit.ExitSuccess -> pure (SText (T.pack out), ec)
@@ -570,7 +641,7 @@ externalToStructured workingDir envMap name args = do
           pure (SText (T.pack out <> (if null err then "" else "\n" <> T.pack err) <> "\n" <> "exit: " <> T.pack (show ec)), ec)
 
 hPutShellError :: T.Text -> IO ()
-hPutShellError msg = TIO.hPutStrLn stderr ("Aeth: " <> msg)
+hPutShellError msg = TIO.hPutStrLn stderr ("aeth: " <> msg)
 
 renderExecException :: T.Text -> IOException -> T.Text
 renderExecException cmd e =
@@ -915,6 +986,80 @@ runJobs = do
           <> T.pack (show (jobStatus job))
           <> " "
           <> jobCommand job
+
+-- | fg - bring a job to foreground
+runFg :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
+runFg args = do
+  st <- get
+  let jobs = backgroundJobs st
+  case args of
+    [] ->
+      -- Bring most recent job to foreground
+      case jobs of
+        [] -> do
+          liftIO $ hPutShellError "fg: no current job"
+          setLastExit (Exit.ExitFailure 1)
+        (job : _) -> bringToForeground job
+    (arg : _) ->
+      -- Parse job ID (e.g., %1 or just 1)
+      let jobIdStr = T.unpack $ T.dropWhile (== '%') arg
+       in case reads jobIdStr :: [(Int, String)] of
+            [(jid, "")] ->
+              case List.find (\j -> jobId j == jid) jobs of
+                Nothing -> do
+                  liftIO $ hPutShellError ("fg: %" <> T.pack (show jid) <> ": no such job")
+                  setLastExit (Exit.ExitFailure 1)
+                Just job -> bringToForeground job
+            _ -> do
+              liftIO $ hPutShellError ("fg: " <> arg <> ": invalid job spec")
+              setLastExit (Exit.ExitFailure 1)
+  where
+    bringToForeground job = do
+      liftIO $ TIO.putStrLn $ jobCommand job
+      -- Send SIGCONT to the process to resume it
+      _ <- liftIO $ signalProcess sigCONT (jobPid job)
+      -- Wait for the process to complete
+      _ <- liftIO $ getProcessStatus True False (jobPid job)
+      -- Remove job from background jobs list
+      st <- get
+      put st {backgroundJobs = filter (\j -> jobId j /= jobId job) (backgroundJobs st)}
+      setLastExit Exit.ExitSuccess
+
+-- | bg - continue a stopped job in background
+runBg :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
+runBg args = do
+  st <- get
+  let jobs = backgroundJobs st
+  case args of
+    [] ->
+      -- Resume most recent stopped job
+      case List.find (\j -> jobStatus j == Stopped) jobs of
+        Nothing -> do
+          liftIO $ hPutShellError "bg: no current job"
+          setLastExit (Exit.ExitFailure 1)
+        Just job -> continueInBackground job
+    (arg : _) ->
+      let jobIdStr = T.unpack $ T.dropWhile (== '%') arg
+       in case reads jobIdStr :: [(Int, String)] of
+            [(jid, "")] ->
+              case List.find (\j -> jobId j == jid) jobs of
+                Nothing -> do
+                  liftIO $ hPutShellError ("bg: %" <> T.pack (show jid) <> ": no such job")
+                  setLastExit (Exit.ExitFailure 1)
+                Just job -> continueInBackground job
+            _ -> do
+              liftIO $ hPutShellError ("bg: " <> arg <> ": invalid job spec")
+              setLastExit (Exit.ExitFailure 1)
+  where
+    continueInBackground job = do
+      liftIO $ TIO.putStrLn $ "[" <> T.pack (show (jobId job)) <> "] " <> jobCommand job <> " &"
+      -- Send SIGCONT to resume the process
+      _ <- liftIO $ signalProcess sigCONT (jobPid job)
+      -- Update job status to Running
+      st <- get
+      let updatedJobs = map (\j -> if jobId j == jobId job then j {jobStatus = Running} else j) (backgroundJobs st)
+      put st {backgroundJobs = updatedJobs}
+      setLastExit Exit.ExitSuccess
 
 -- | Find executable in PATH, or test directly if name contains '/'
 findExecutable :: Map.Map String String -> String -> IO (Maybe FilePath)

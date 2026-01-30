@@ -99,10 +99,10 @@ alias.la = "@ls -a"
 Requirements: GHC 9.6+ and Cabal
 
 ```bash
-git clone https://github.com/prabinpanta0/Aeth
+git clone https://github.com/prabinpanta0/aeth
 cd Aeth
 cabal build
-cabal run Aeth
+cabal run aeth
 ```
 
 ---
@@ -126,11 +126,11 @@ cabal run Aeth
 
 ## Configuration
 
-Location: `~/.config/Aeth/config.toml`
+Location: `~/.config/aeth/config.toml`
 
 ```bash
-mkdir -p ~/.config/Aeth
-cp config/config.toml ~/.config/Aeth/config.toml
+mkdir -p ~/.config/aeth
+cp config/config.toml ~/.config/aeth/config.toml
 ```
 
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for details.
@@ -159,13 +159,18 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for details.
 - Structured commands (@ls, @ps, @df, @env, @find)
 - Structured transformations (filter, sort, select)
 - Command aliases
+- Full I/O redirection (via /bin/sh delegation)
+- Job control (fg, bg)
+- Syntax highlighting
+- Auto-suggestions (fish-like history suggestions) - works but needs polish
+- Command chaining (&&, ||, ;)
 
 ### Planned
 
-- Full I/O redirection
-- Job control (fg, bg)
-- Syntax highlighting
-- Auto-suggestions
+- Native I/O redirection (without shell delegation)
+- Process substitution
+- Brace expansion
+- Extended globbing
 
 ---
 

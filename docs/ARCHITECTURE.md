@@ -22,7 +22,7 @@ The user chooses the mode with a prefix:
 app/
   Main.hs                    -- Entry point
 
-src/Aeth/
+src/aeth/
   Types.hs                   -- Core types
   Parse.hs                   -- Command parser
   Exec.hs                    -- Command execution

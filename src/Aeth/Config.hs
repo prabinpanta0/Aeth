@@ -198,11 +198,11 @@ configDir :: IO FilePath
 configDir = do
   mXdg <- Env.lookupEnv "XDG_CONFIG_HOME"
   case mXdg of
-    Just xdg | not (null xdg) -> pure (xdg FP.</> "Aeth")
+    Just xdg | not (null xdg) -> pure (xdg FP.</> "aeth")
     _ -> do
       mHome <- Env.lookupEnv "HOME"
       let home = fromMaybe "." mHome
-      pure (home FP.</> ".config" FP.</> "Aeth")
+      pure (home FP.</> ".config" FP.</> "aeth")
 
 configHsPath :: IO FilePath
 configHsPath = do
@@ -302,7 +302,7 @@ loadHaskellConfig filePath = do
                     renderPromptTriples <$> fn c b e
                 )
             _ ->
-              pure (\_ -> pure ("Aeth: unsupported myPromptSegments type: " <> ty <> "\n"))
+              pure (\_ -> pure ("aeth: unsupported myPromptSegments type: " <> ty <> "\n"))
         else do
           mPrompt <- Hint.typeChecks "myPrompt"
           if not mPrompt
@@ -396,7 +396,7 @@ loadHaskellConfig filePath = do
                         fn c b e
                     )
                 _ ->
-                  pure (\_ -> pure ("Aeth: unsupported myPrompt type: " <> ty <> "\n"))
+                  pure (\_ -> pure ("aeth: unsupported myPrompt type: " <> ty <> "\n"))
 
     pure ShellConfig {prompt = promptFn, uiMode = NormalUi, structuredExtensions = []}
 

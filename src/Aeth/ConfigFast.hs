@@ -47,7 +47,9 @@ data ShellConfig = ShellConfig
     aliases :: Map.Map T.Text T.Text,
     customPrompt :: Maybe T.Text, -- Custom prompt format string
     safeMode :: Bool, -- Restrict dangerous commands
-    historySize :: Int -- Max history entries
+    historySize :: Int, -- Max history entries
+    syntaxHighlighting :: Bool, -- Enable syntax highlighting
+    autoSuggestions :: Bool -- Enable fish-like auto-suggestions
   }
   deriving (Eq, Show)
 
@@ -79,6 +81,19 @@ defaultPromptColors =
       successColor = "green"
     }
 
+-- | Default aliases for better user experience
+defaultAliases :: Map.Map T.Text T.Text
+defaultAliases =
+  Map.fromList
+    [ ("ls", "ls --color=auto"),
+      ("grep", "grep --color=auto"),
+      ("fgrep", "fgrep --color=auto"),
+      ("egrep", "egrep --color=auto"),
+      ("diff", "diff --color=auto"),
+      ("ll", "ls -la --color=auto"),
+      ("la", "@ls -a")
+    ]
+
 defaultConfig :: ShellConfig
 defaultConfig =
   ShellConfig
@@ -88,10 +103,12 @@ defaultConfig =
       showExitCode = True,
       showDuration = False,
       promptColors = defaultPromptColors,
-      aliases = Map.empty,
+      aliases = defaultAliases,
       customPrompt = Nothing,
       safeMode = False,
-      historySize = 10000
+      historySize = 10000,
+      syntaxHighlighting = True,
+      autoSuggestions = False
     }
 
 -- | Load configuration - simple and fast!
@@ -101,14 +118,45 @@ loadConfig = do
   exists <- Dir.doesFileExist path
   if not exists
     then do
-      -- Create default config file if it doesn't exist
-      createDefaultConfig path
-      pure (defaultConfig, Nothing)
+      -- Check for old config location and migrate if found
+      migrateResult <- migrateOldConfig path
+      case migrateResult of
+        Just cfg -> pure (cfg, Just "Migrated config from ~/.config/Aeth to ~/.config/aeth")
+        Nothing -> do
+          -- Create default config file if it doesn't exist
+          createDefaultConfig path
+          pure (defaultConfig, Nothing)
     else do
       -- Parse config from file
       content <- TIO.readFile path
       let cfg = parseConfigLines (T.lines content)
       pure (cfg, Nothing)
+
+-- | Migrate config from old ~/.config/Aeth to new ~/.config/aeth
+migrateOldConfig :: FilePath -> IO (Maybe ShellConfig)
+migrateOldConfig newPath = do
+  mHome <- Env.lookupEnv "HOME"
+  case mHome of
+    Nothing -> pure Nothing
+    Just home -> do
+      let oldPath = home FP.</> ".config" FP.</> "Aeth" FP.</> "config.toml"
+      oldExists <- Dir.doesFileExist oldPath
+      if not oldExists
+        then pure Nothing
+        else do
+          -- Copy old config to new location
+          dir <- configDir
+          Dir.createDirectoryIfMissing True dir
+          content <- TIO.readFile oldPath
+          TIO.writeFile newPath content
+          -- Also copy history file if it exists
+          let oldHistPath = home FP.</> ".config" FP.</> "Aeth" FP.</> "history"
+          oldHistExists <- Dir.doesFileExist oldHistPath
+          when oldHistExists $ do
+            histPath <- historyFilePath
+            TIO.readFile oldHistPath >>= TIO.writeFile histPath
+          -- Parse the migrated config
+          pure (Just (parseConfigLines (T.lines content)))
 
 -- | Parse config from lines (simple key=value format)
 parseConfigLines :: [T.Text] -> ShellConfig
@@ -158,6 +206,8 @@ parseConfigLines ls = foldr applyLine defaultConfig ls
         "prompt" -> cfg {customPrompt = Just val, promptStyle = CustomPrompt}
         "safe_mode" -> cfg {safeMode = parseBool val}
         "history_size" -> cfg {historySize = parseIntDefault 10000 val}
+        "syntax_highlighting" -> cfg {syntaxHighlighting = parseBool val}
+        "auto_suggestions" -> cfg {autoSuggestions = parseBool val}
         -- Ignore unknown/legacy keys like use_dynamic_prompt
         _ -> cfg
 
@@ -196,7 +246,7 @@ createDefaultConfig path = do
 defaultConfigContent :: T.Text
 defaultConfigContent =
   T.unlines
-    [ "# Aeth Shell Configuration",
+    [ "# aeth Shell Configuration",
       "# See docs/CONFIGURATION.md for full documentation",
       "",
       "# UI Mode: 'normal' or 'tui' (fullscreen)",
@@ -220,11 +270,21 @@ defaultConfigContent =
       "error_color = \"red\"",
       "success_color = \"green\"",
       "",
+      "# Features",
+      "syntax_highlighting = true",
+      "auto_suggestions = false",
+      "",
       "# Security",
       "safe_mode = false",
       "",
       "# History",
-      "history_size = 10000"
+      "history_size = 10000",
+      "",
+      "# Aliases - add your own aliases here",
+      "# alias.ls = \"ls --color=auto\"",
+      "# alias.ll = \"ls -la --color=auto\"",
+      "# alias.la = \"@ls -a\"",
+      "# alias.grep = \"grep --color=auto\""
     ]
 
 -- | Build the prompt function from config
@@ -335,11 +395,11 @@ configDir :: IO FilePath
 configDir = do
   mXdg <- Env.lookupEnv "XDG_CONFIG_HOME"
   case mXdg of
-    Just xdg | not (null xdg) -> pure (xdg FP.</> "Aeth")
+    Just xdg | not (null xdg) -> pure (xdg FP.</> "aeth")
     _ -> do
       mHome <- Env.lookupEnv "HOME"
       let home = fromMaybe "." mHome
-      pure (home FP.</> ".config" FP.</> "Aeth")
+      pure (home FP.</> ".config" FP.</> "aeth")
 
 configTomlPath :: IO FilePath
 configTomlPath = (FP.</> "config.toml") <$> configDir

@@ -52,4 +52,5 @@ src/home/
 src/Aeth.git/
 *.src.tar.gz
 *.log
+.serena/
 aeth-git

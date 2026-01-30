@@ -36,7 +36,7 @@ run = do
   setPromptFunction (prompt cfg)
   case mCfgErr of
     Nothing -> pure ()
-    Just e -> TIO.hPutStrLn stderr ("Aeth: " <> T.pack e)
+    Just e -> TIO.hPutStrLn stderr ("aeth: " <> T.pack e)
   evalStateT (startup cfg >> runLoop cfg) st0
 
 runLoop :: ShellConfig -> StateT ShellState IO ()
@@ -93,17 +93,17 @@ loopTui _cfg = do
 
 runOneCapture :: T.Text -> StateT ShellState IO T.Text
 runOneCapture t =
-  case parsePipeline t of
+  case parseCommandList t of
     Left e ->
       if e == "empty"
         then pure ""
         else do
           modify' (\st -> st {lastExitCode = 2})
           modify' (\st -> st {lastDurationMs = Nothing})
-          pure ("Aeth: parse: " <> renderParseError e)
-    Right p -> do
+          pure ("aeth: parse: " <> renderParseError e)
+    Right cl -> do
       start <- liftIO getCurrentTime
-      out <- runPipelineCapture p
+      out <- runCommandListCapture cl
       end <- liftIO getCurrentTime
       let ms = max 0 (floor (realToFrac (diffUTCTime end start) * (1000 :: Double)) :: Int)
       modify' (\st -> st {lastDurationMs = Just ms})
@@ -138,18 +138,18 @@ startup _cfg = do
 
 runOne :: (MonadIO m) => T.Text -> StateT ShellState m ()
 runOne t =
-  case parsePipeline t of
+  case parseCommandList t of
     Left e ->
       if e == "empty"
         then pure ()
         else do
           modify' (\st -> st {lastExitCode = 2})
           modify' (\st -> st {lastDurationMs = Nothing})
-          liftIO (TIO.hPutStrLn stderr ("Aeth: parse: " <> renderParseError e))
-    Right p -> do
+          liftIO (TIO.hPutStrLn stderr ("aeth: parse: " <> renderParseError e))
+    Right cl -> do
       start <- liftIO getCurrentTime
       liftIO (hFlush stdout)
-      runPipeline Map.empty p
+      runCommandList Map.empty cl
       end <- liftIO getCurrentTime
       let ms = max 0 (floor (realToFrac (diffUTCTime end start) * (1000 :: Double)) :: Int)
       modify' (\st -> st {lastDurationMs = Just ms})
