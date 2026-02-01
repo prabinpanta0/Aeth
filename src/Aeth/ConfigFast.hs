@@ -49,7 +49,9 @@ data ShellConfig = ShellConfig
     safeMode :: Bool, -- Restrict dangerous commands
     historySize :: Int, -- Max history entries
     syntaxHighlighting :: Bool, -- Enable syntax highlighting
-    autoSuggestions :: Bool -- Enable fish-like auto-suggestions
+    autoSuggestions :: Bool, -- Enable fish-like auto-suggestions
+    sourceFiles :: [T.Text], -- Files to source at startup
+    binaryPaths :: [T.Text] -- Additional paths to add to PATH
   }
   deriving (Eq, Show)
 
@@ -108,7 +110,9 @@ defaultConfig =
       safeMode = False,
       historySize = 10000,
       syntaxHighlighting = True,
-      autoSuggestions = False
+      autoSuggestions = False,
+      sourceFiles = [],
+      binaryPaths = []
     }
 
 -- | Load configuration - simple and fast!
@@ -176,14 +180,32 @@ parseConfigLines ls = foldr applyLine defaultConfig ls
                         let aliasName = T.drop 6 (T.strip key) -- Remove "alias."
                             aliasVal = unquote (T.strip (T.drop 1 val))
                          in cfg {aliases = Map.insert aliasName aliasVal (aliases cfg)}
-                else case T.breakOn "=" stripped of
-                  (key, val)
-                    | T.null val -> cfg
-                    | otherwise ->
-                        let k = T.strip key
-                            v = T.strip (T.drop 1 val) -- drop the '='
-                            vUnquoted = unquote v
-                         in applySetting k vUnquoted cfg
+                -- Handle source.N = "/path/to/file"
+                else
+                  if T.isPrefixOf "source." stripped
+                    then case T.breakOn "=" stripped of
+                      (_, val)
+                        | T.null val -> cfg
+                        | otherwise ->
+                            let sourceVal = unquote (T.strip (T.drop 1 val))
+                             in cfg {sourceFiles = sourceVal : sourceFiles cfg}
+                    -- Handle path.N = "/custom/bin"
+                    else
+                      if T.isPrefixOf "path." stripped
+                        then case T.breakOn "=" stripped of
+                          (_, val)
+                            | T.null val -> cfg
+                            | otherwise ->
+                                let pathVal = unquote (T.strip (T.drop 1 val))
+                                 in cfg {binaryPaths = pathVal : binaryPaths cfg}
+                        else case T.breakOn "=" stripped of
+                          (key, val)
+                            | T.null val -> cfg
+                            | otherwise ->
+                                let k = T.strip key
+                                    v = T.strip (T.drop 1 val) -- drop the '='
+                                    vUnquoted = unquote v
+                                 in applySetting k vUnquoted cfg
 
     unquote t =
       let s = T.unpack t
@@ -284,7 +306,15 @@ defaultConfigContent =
       "# alias.ls = \"ls --color=auto\"",
       "# alias.ll = \"ls -la --color=auto\"",
       "# alias.la = \"@ls -a\"",
-      "# alias.grep = \"grep --color=auto\""
+      "# alias.grep = \"grep --color=auto\"",
+      "",
+      "# Source files at startup (like source ~/.bashrc)",
+      "# source.1 = \"~/.bashrc\"",
+      "# source.2 = \"~/.bash_aliases\"",
+      "",
+      "# Additional paths to add to PATH",
+      "# path.1 = \"~/.local/bin\"",
+      "# path.2 = \"/opt/custom/bin\""
     ]
 
 -- | Build the prompt function from config

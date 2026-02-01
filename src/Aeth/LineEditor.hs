@@ -2,6 +2,8 @@
 
 module Aeth.LineEditor
   ( LineEditor,
+    LineEditorSettings (..),
+    defaultSettings,
     withLineEditor,
     getLineEdited,
   )
@@ -34,16 +36,31 @@ import qualified System.Posix.Terminal as PT
 -- Normal-terminal line editor:
 -- - does NOT use an alternate screen
 -- - highlights the input as you type
--- - shows a fish-like autosuggestion (from history) in faint text
+-- - shows a fish-like autosuggestion (from history) in faint text (if enabled)
 -- - basic keys: left/right/home/end, backspace/delete, tab (accept suggestion), enter, ctrl-d
+
+-- | Settings for the line editor
+data LineEditorSettings = LineEditorSettings
+  { leSyntaxHighlighting :: Bool, -- Enable syntax highlighting
+    leAutoSuggestions :: Bool -- Enable fish-like auto-suggestions
+  }
+  deriving (Eq, Show)
+
+-- | Default settings (all features enabled)
+defaultSettings :: LineEditorSettings
+defaultSettings =
+  LineEditorSettings
+    { leSyntaxHighlighting = True,
+      leAutoSuggestions = True
+    }
 
 data LineEditor = LineEditor
 
 withLineEditor :: (LineEditor -> m a) -> m a
 withLineEditor action = action LineEditor
 
-getLineEdited :: LineEditor -> [T.Text] -> String -> [String] -> IO (Maybe String)
-getLineEdited _ _scrollback prompt history0 =
+getLineEdited :: LineEditor -> LineEditorSettings -> [T.Text] -> String -> [String] -> IO (Maybe String)
+getLineEdited _ settings _scrollback prompt history0 =
   withRawTerminal $ do
     putStr prompt
     hFlush stdout
@@ -51,6 +68,11 @@ getLineEdited _ _scrollback prompt history0 =
   where
     -- Newest-first history for navigation.
     history = reverse history0
+    
+    -- Helper to get suggestion (respects autoSuggestions setting)
+    getSuggestion buf
+      | leAutoSuggestions settings = suggestion buf history
+      | otherwise = Nothing
 
     loop :: String -> Int -> Int -> Maybe Int -> String -> IO (Maybe String)
     loop buf cursor prevLines histIx savedBuf = do
@@ -99,7 +121,7 @@ getLineEdited _ _scrollback prompt history0 =
             then loop buf cursor newPrevLines histIx savedBuf
             else loop (take cursor buf <> drop (cursor + 1) buf) cursor newPrevLines histIx savedBuf
         KTab ->
-          case suggestion buf history of
+          case getSuggestion buf of
             Nothing -> loop buf cursor newPrevLines histIx savedBuf
             Just sug -> loop sug (length sug) newPrevLines histIx savedBuf
         KChar c ->
@@ -136,10 +158,12 @@ getLineEdited _ _scrollback prompt history0 =
 
       -- Draw prompt + buffer + suggestion.
       putStr prompt
-      renderHighlighted (T.pack buf)
+      if leSyntaxHighlighting settings
+        then renderHighlighted (T.pack buf)
+        else putStr buf
 
       mSug <-
-        case suggestion buf history of
+        case getSuggestion buf of
           Nothing -> pure Nothing
           Just sug -> do
             let rest = drop (length buf) sug

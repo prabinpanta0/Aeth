@@ -24,7 +24,7 @@ import qualified Data.Text.IO as TIO
 import qualified System.Directory as Dir
 import qualified System.Exit as Exit
 import qualified System.FilePath as FP
-import System.IO (hClose, stderr)
+import System.IO (IOMode (..), hClose, openFile, stderr)
 import System.Posix.Process (getProcessStatus)
 import System.Posix.Signals (sigCONT, signalProcess)
 import qualified System.Process as Proc
@@ -66,19 +66,37 @@ setLastExit ec = do
 type AliasMap = Map.Map T.Text T.Text
 
 -- | Expand aliases in a segment
+-- Note: We only apply aliases to raw commands, not structured (@) commands.
+-- For structured commands, look up the alias with the "@" prefix.
 expandAlias :: AliasMap -> Segment -> Segment
 expandAlias aliasMap seg =
-  case Map.lookup (segName seg) aliasMap of
-    Nothing -> seg
-    Just expanded ->
-      let tokens = T.words expanded
-       in case tokens of
-            [] -> seg
-            (cmd : args) ->
-              let isStructured = T.isPrefixOf "@" cmd
-                  mode = if isStructured then Structured else RawString
-                  name = if isStructured then T.drop 1 cmd else cmd
-               in seg {segMode = mode, segName = name, segArgs = args ++ segArgs seg}
+  case segMode seg of
+    Structured ->
+      -- For structured commands, look up alias with "@" prefix (e.g., "@ls" -> "@ls -a")
+      case Map.lookup ("@" <> segName seg) aliasMap of
+        Nothing -> seg -- No structured alias defined, use as-is
+        Just expanded ->
+          let tokens = T.words expanded
+           in case tokens of
+                [] -> seg
+                (cmd : args) ->
+                  let isStructured = T.isPrefixOf "@" cmd
+                      mode = if isStructured then Structured else RawString
+                      name = if isStructured then T.drop 1 cmd else cmd
+                   in seg {segMode = mode, segName = name, segArgs = args ++ segArgs seg}
+    RawString ->
+      -- For raw commands, look up alias by name
+      case Map.lookup (segName seg) aliasMap of
+        Nothing -> seg
+        Just expanded ->
+          let tokens = T.words expanded
+           in case tokens of
+                [] -> seg
+                (cmd : args) ->
+                  let isStructured = T.isPrefixOf "@" cmd
+                      mode = if isStructured then Structured else RawString
+                      name = if isStructured then T.drop 1 cmd else cmd
+                   in seg {segMode = mode, segName = name, segArgs = args ++ segArgs seg}
 
 runPipeline :: (MonadIO m) => AliasMap -> Pipeline -> StateT ShellState m ()
 runPipeline aliasMap (Pipeline segments) =
@@ -340,6 +358,8 @@ runRawSingle :: (MonadIO m) => Segment -> StateT ShellState m ()
 runRawSingle seg = do
   let name = segName seg
   let args = segArgs seg
+  let redirs = segRedirects seg
+  let isBg = segBackground seg
   -- Check for shell operators first; if present, delegate to /bin/sh so that
   -- commands like "cd app && ls" work correctly.
   if shouldUseShSegment seg
@@ -361,7 +381,7 @@ runRawSingle seg = do
           "." -> runSource args -- POSIX alias for source
           "type" -> runType args
           "which" -> runWhich args
-          "echo" -> runEcho args
+          "echo" -> runEchoWithRedirects args redirs
           "true" -> setLastExit Exit.ExitSuccess
           "false" -> setLastExit (Exit.ExitFailure 1)
           "jobs" -> runJobs
@@ -380,7 +400,7 @@ runRawSingle seg = do
                   Just oldpwd -> doCd st envMap (Just oldpwd)
               [] -> doCd st envMap Nothing
               (p : _) -> doCd st envMap (Just (T.unpack (expandTextEnv envMap p)))
-          _ -> runExternal name args
+          _ -> runExternalWithRedirects name args redirs isBg
 
 runRawSingleCapture :: Segment -> StateT ShellState IO T.Text
 runRawSingleCapture seg = do
@@ -434,35 +454,179 @@ renderRedirection r =
 
 shouldUseShSegment :: Segment -> Bool
 shouldUseShSegment s =
-  -- Use /bin/sh for complex shell syntax or when redirections are present
-  -- Note: &&, ||, ; are now handled at command list level, not here
-  not (null (segRedirects s))
-    || segBackground s
-    || let cmd = renderRawSegment s
-        in T.any (`elem` ("><()\\`" :: String)) cmd
-             || T.isInfixOf "|&" cmd
+  -- Use /bin/sh only for complex shell syntax that we can't handle natively
+  -- Note: Simple redirections (>, <, >>, 2>, etc.) are now handled natively
+  -- Background jobs (&) are handled natively
+  let cmd = renderRawSegment s
+   in -- Only delegate to sh for very complex cases:
+      -- - Command substitution: $(cmd) or `cmd`
+      -- - Process substitution: <(cmd) or >(cmd) - TODO: implement natively
+      -- - Pipelines within commands (rare edge case)
+      T.isInfixOf "$(" cmd
+        || T.isInfixOf "`" cmd
+        || T.isInfixOf "<(" cmd
+        || T.isInfixOf ">(" cmd
+        || T.isInfixOf "|&" cmd
 
-runExternal :: (MonadIO m) => T.Text -> [T.Text] -> StateT ShellState m ()
-runExternal name args = do
+-- | Check if redirections can be handled natively
+_canHandleRedirectsNatively :: [Redirection] -> Bool
+_canHandleRedirectsNatively redirs =
+  all isSimpleRedirect redirs
+  where
+    isSimpleRedirect r = case redirType r of
+      RedirectIn -> True
+      RedirectOut -> True
+      RedirectAppend -> True
+      RedirectErr -> True
+      RedirectErrAppend -> True
+      RedirectErrToOut -> True
+      RedirectOutAndErr -> True
+
+-- | Run an external command with native I/O redirection support
+runExternalWithRedirects :: (MonadIO m) => T.Text -> [T.Text] -> [Redirection] -> Bool -> StateT ShellState m ()
+runExternalWithRedirects name args redirs isBg = do
   st <- get
   let envMap = effectiveEnvMap st
   let name' = expandTextEnv envMap name
   let args' = map (expandTextEnv envMap) args
   expandedArgs <- liftIO (expandGlobs envMap (cwd st) args')
   let envMerged = Map.toList envMap
-  let cp =
-        (Proc.proc (T.unpack name') (map T.unpack expandedArgs))
-          { Proc.cwd = Just (cwd st),
-            Proc.env = Just envMerged
-          }
-  result <- liftIO (try (Proc.withCreateProcess cp (\_ _ _ ph -> Proc.waitForProcess ph)) :: IO (Either IOException Exit.ExitCode))
+
+  -- Build CreateProcess with redirections and run, returning result for state update
+  result <- liftIO $ do
+    -- Prepare stdin/stdout/stderr handles based on redirections
+    (stdinSpec, stdoutSpec, stderrSpec) <- buildStdSpecs (cwd st) envMap redirs
+
+    let cp =
+          (Proc.proc (T.unpack name') (map T.unpack expandedArgs))
+            { Proc.cwd = Just (cwd st),
+              Proc.env = Just envMerged,
+              Proc.std_in = stdinSpec,
+              Proc.std_out = stdoutSpec,
+              Proc.std_err = stderrSpec
+            }
+
+    if isBg
+      then do
+        -- Start process in background
+        (_, _, _, ph) <- Proc.createProcess cp
+        pid <- Proc.getPid ph
+        case pid of
+          Just p -> do
+            TIO.putStrLn $ "[" <> T.pack (show (nextJobId st)) <> "] " <> T.pack (show p)
+            -- Return job info for state update
+            return (Left (fromIntegral p, T.unwords (name : args)))
+          Nothing -> return (Right Exit.ExitSuccess) -- Background with no PID, treat as success
+      else do
+        -- Run synchronously
+        execResult <- try (Proc.withCreateProcess cp (\_ _ _ ph -> Proc.waitForProcess ph)) :: IO (Either IOException Exit.ExitCode)
+        case execResult of
+          Left e -> do
+            hPutShellError (renderExecException name e)
+            return (Right (Exit.ExitFailure 127))
+          Right ec -> do
+            when (ec /= Exit.ExitSuccess) $ hPutShellError ("exit: " <> T.pack (show ec))
+            return (Right ec)
+
+  -- Update state based on result
   case result of
-    Left e -> do
-      liftIO (hPutShellError (renderExecException name e))
-      put st {lastExitCode = 127}
-    Right ec -> do
+    Left (pid, cmd) -> do
+      -- Background job: add to job list and increment job ID
+      let newJob =
+            BackgroundJob
+              { jobId = nextJobId st,
+                jobPid = pid,
+                jobCommand = cmd,
+                jobStatus = Running
+              }
+      put
+        st
+          { backgroundJobs = backgroundJobs st ++ [newJob],
+            nextJobId = nextJobId st + 1
+          }
+      setLastExit Exit.ExitSuccess -- Background jobs return success immediately
+    Right ec ->
       setLastExit ec
-      when (ec /= Exit.ExitSuccess) $ liftIO (hPutShellError ("exit: " <> T.pack (show ec)))
+
+-- | Build std_in, std_out, std_err specs from redirections
+buildStdSpecs ::
+  FilePath ->
+  Map.Map String String ->
+  [Redirection] ->
+  IO (Proc.StdStream, Proc.StdStream, Proc.StdStream)
+buildStdSpecs workDir envMap redirs = do
+  let stdinRedir = List.find (\r -> redirType r == RedirectIn) redirs
+      stdoutRedir = List.find (\r -> redirType r `elem` [RedirectOut, RedirectAppend, RedirectOutAndErr]) redirs
+      stderrRedir = List.find (\r -> redirType r `elem` [RedirectErr, RedirectErrAppend, RedirectErrToOut, RedirectOutAndErr]) redirs
+
+  stdinSpec <- case stdinRedir of
+    Nothing -> return Proc.Inherit
+    Just r -> do
+      let path = expandPath workDir envMap (redirTarget r)
+      h <- openFile (T.unpack path) ReadMode
+      return (Proc.UseHandle h)
+
+  stdoutSpec <- case stdoutRedir of
+    Nothing -> return Proc.Inherit
+    Just r -> case redirType r of
+      RedirectOut -> do
+        let path = expandPath workDir envMap (redirTarget r)
+        h <- openFile (T.unpack path) WriteMode
+        return (Proc.UseHandle h)
+      RedirectAppend -> do
+        let path = expandPath workDir envMap (redirTarget r)
+        h <- openFile (T.unpack path) AppendMode
+        return (Proc.UseHandle h)
+      RedirectOutAndErr -> do
+        let path = expandPath workDir envMap (redirTarget r)
+        h <- openFile (T.unpack path) WriteMode
+        return (Proc.UseHandle h)
+      _ -> return Proc.Inherit
+
+  -- For 2>&1 (RedirectErrToOut), stderr should use the same destination as stdout
+  -- For RedirectOutAndErr, use the already-opened stdout handle instead of opening twice
+  stderrSpec <- case stderrRedir of
+    Nothing -> return Proc.Inherit
+    Just r -> case redirType r of
+      RedirectErr -> do
+        let path = expandPath workDir envMap (redirTarget r)
+        h <- openFile (T.unpack path) WriteMode
+        return (Proc.UseHandle h)
+      RedirectErrAppend -> do
+        let path = expandPath workDir envMap (redirTarget r)
+        h <- openFile (T.unpack path) AppendMode
+        return (Proc.UseHandle h)
+      RedirectErrToOut ->
+        -- 2>&1: stderr goes where stdout goes
+        return stdoutSpec
+      RedirectOutAndErr ->
+        -- &> or >&: share stdout's spec (already opened handle)
+        return stdoutSpec
+      _ -> return Proc.Inherit
+
+  return (stdinSpec, stdoutSpec, stderrSpec)
+
+-- | Expand path with ~ and environment variables
+-- Note: ~username expansion is simplified - it uses $HOME + rest rather than
+-- looking up the actual home directory of the user. For full POSIX behavior,
+-- System.Posix.User.getUserEntryForName could be used.
+expandPath :: FilePath -> Map.Map String String -> T.Text -> T.Text
+expandPath workDir envMap path =
+  let expanded = expandTextEnv envMap path
+      str = T.unpack expanded
+   in case str of
+        ('~' : '/' : rest) -> case Map.lookup "HOME" envMap of
+          Just home -> T.pack (home ++ "/" ++ rest)
+          Nothing -> expanded
+        ('~' : rest) -> case Map.lookup "HOME" envMap of
+          -- Simplified: treats ~foo as $HOME/foo, not as foo's home directory
+          Just home -> T.pack (home ++ "/" ++ rest)
+          Nothing -> expanded
+        ('/' : _) -> expanded -- Absolute path
+        _ -> T.pack (workDir FP.</> str) -- Relative path
+
+_runExternal :: (MonadIO m) => T.Text -> [T.Text] -> StateT ShellState m ()
+_runExternal name args = runExternalWithRedirects name args [] False
 
 runExternalCapture :: T.Text -> [T.Text] -> StateT ShellState IO T.Text
 runExternalCapture name args = do
@@ -657,8 +821,88 @@ isCommandNotFound msg =
 
 expandGlobs :: Map.Map String String -> FilePath -> [T.Text] -> IO [T.Text]
 expandGlobs envMap workingDir args = do
-  let args1 = map (expandArgShorthands envMap) args
+  -- First, expand braces (e.g., {a,b,c} -> a b c, {1..5} -> 1 2 3 4 5)
+  let braceExpanded = concatMap expandBraces args
+  -- Then, expand shorthands and env vars
+  let args1 = map (expandArgShorthands envMap) braceExpanded
+  -- Finally, expand globs
   fmap concat (mapM (expandOne workingDir) args1)
+
+-- | Expand brace patterns like {a,b,c} and {1..10}
+-- Returns a list of expanded strings
+expandBraces :: T.Text -> [T.Text]
+expandBraces t =
+  let s = T.unpack t
+   in case parseBraceExpr s of
+        Nothing -> [t] -- No brace pattern found
+        Just results -> map T.pack results
+
+-- | Parse and expand a brace expression
+-- Returns Nothing if no valid brace pattern, Just results otherwise
+parseBraceExpr :: String -> Maybe [String]
+parseBraceExpr s =
+  case findBracePattern s of
+    Nothing -> Nothing
+    Just (prefix, content, suffix) ->
+      let expanded = expandBraceContent content
+       in Just [prefix ++ e ++ suffix | e <- expanded]
+
+-- | Find the first complete brace pattern {..}
+-- Returns (prefix, content, suffix) if found
+findBracePattern :: String -> Maybe (String, String, String)
+findBracePattern s = go "" s (0 :: Int)
+  where
+    go :: String -> String -> Int -> Maybe (String, String, String)
+    go _ [] _ = Nothing
+    go prefix ('{' : rest) 0 =
+      case findClosingBrace rest (1 :: Int) "" of
+        Just (content, suffix) -> Just (reverse prefix, content, suffix)
+        Nothing -> go ('{' : prefix) rest 0
+    go prefix (c : rest) depth = go (c : prefix) rest depth
+
+    findClosingBrace :: String -> Int -> String -> Maybe (String, String)
+    findClosingBrace [] _ _ = Nothing
+    findClosingBrace ('}' : rest) 1 acc = Just (reverse acc, rest)
+    findClosingBrace ('{' : rest) n acc = findClosingBrace rest (n + 1) ('{' : acc)
+    findClosingBrace ('}' : rest) n acc = findClosingBrace rest (n - 1) ('}' : acc)
+    findClosingBrace (c : rest) n acc = findClosingBrace rest n (c : acc)
+
+-- | Expand the content of a brace pattern
+expandBraceContent :: String -> [String]
+expandBraceContent content =
+  case parseRange content of
+    Just xs -> xs -- Numeric or char range like 1..10 or a..z
+    Nothing -> splitBraceItems content -- Comma-separated items
+
+-- | Parse a range expression like 1..10 or a..z
+parseRange :: String -> Maybe [String]
+parseRange s =
+  case break (== '.') s of
+    (start, '.' : '.' : end) ->
+      case (reads start :: [(Int, String)], reads end :: [(Int, String)]) of
+        ([(n1, "")], [(n2, "")]) ->
+          if n1 <= n2
+            then Just (map show [n1 .. n2])
+            else Just (map show [n1, n1 - 1 .. n2])
+        _ ->
+          -- Try character range
+          case (start, end) of
+            ([c1], [c2])
+              | c1 <= c2 -> Just (map (: []) [c1 .. c2])
+              | otherwise -> Just (map (: []) [c1, pred c1 .. c2])
+            _ -> Nothing
+    _ -> Nothing
+
+-- | Split brace content by commas, respecting nested braces
+splitBraceItems :: String -> [String]
+splitBraceItems = go "" (0 :: Int)
+  where
+    go :: String -> Int -> String -> [String]
+    go acc _ [] = [reverse acc]
+    go acc 0 (',' : rest) = reverse acc : go "" 0 rest
+    go acc n ('{' : rest) = go ('{' : acc) (n + 1) rest
+    go acc n ('}' : rest) = go ('}' : acc) (max 0 (n - 1)) rest
+    go acc n (c : rest) = go (c : acc) n rest
 
 expandArgShorthands :: Map.Map String String -> T.Text -> T.Text
 expandArgShorthands envMap t =
@@ -667,7 +911,8 @@ expandArgShorthands envMap t =
 
 expandOne :: FilePath -> T.Text -> IO [T.Text]
 expandOne workingDir arg
-  | not (hasGlobChars arg) = pure [arg]
+  | not (hasGlobChars arg) && not (T.isInfixOf "**" arg) = pure [arg]
+  | T.isInfixOf "**" arg = expandRecursiveGlob workingDir arg
   | otherwise = do
       let raw = T.unpack arg
       let (dirPart, pattern) = splitDirPattern raw
@@ -699,6 +944,121 @@ expandOne workingDir arg
                 else
                   pure
                     (map (T.pack . (if null dirPart || dirPart == "." then id else (dirPart FP.</>))) sorted)
+
+-- | Expand recursive glob patterns like **/*.txt
+-- Supports:
+--   **/*.txt    - all .txt files in any subdirectory
+--   src/**/*.hs - all .hs files under src/
+--   **          - all files recursively
+expandRecursiveGlob :: FilePath -> T.Text -> IO [T.Text]
+expandRecursiveGlob workingDir pattern = do
+  let patStr = T.unpack pattern
+      -- Split pattern into prefix (before **) and suffix (after **)
+      (prefix, rest) = splitOnDoubleStar patStr
+      -- Get the base directory to search
+      baseDir =
+        if null prefix || prefix == "."
+          then workingDir
+          else
+            if FP.isAbsolute prefix
+              then prefix
+              else workingDir FP.</> prefix
+      -- The pattern to match after **
+      suffixPattern = case rest of
+        '/' : xs -> xs
+        xs -> xs
+  exists <- Dir.doesDirectoryExist baseDir
+  if not exists
+    then pure [pattern] -- Return original if base doesn't exist
+    else do
+      -- Get all files recursively
+      allFiles <- getRecursiveContents baseDir
+      -- Filter by suffix pattern
+      let matches = filter (matchRecursivePattern suffixPattern) allFiles
+          -- Convert back to relative paths
+          relPaths = map (makeRelativeTo baseDir) matches
+          -- Add prefix back
+          results =
+            map
+              ( \p ->
+                  if null prefix || prefix == "."
+                    then p
+                    else prefix FP.</> p
+              )
+              relPaths
+          sorted = List.sort results
+      if null sorted
+        then pure [pattern] -- No matches, return original pattern
+        else pure (map T.pack sorted)
+
+-- | Split a pattern on the first occurrence of **
+splitOnDoubleStar :: String -> (String, String)
+splitOnDoubleStar s = go "" s
+  where
+    go acc ('*' : '*' : rest) = (trimTrailingSlash (reverse acc), rest)
+    go acc (c : rest) = go (c : acc) rest
+    go acc [] = (reverse acc, "")
+
+    trimTrailingSlash p = case reverse p of
+      '/' : xs -> reverse xs
+      _ -> p
+
+-- | Get all files and directories recursively
+getRecursiveContents :: FilePath -> IO [FilePath]
+getRecursiveContents dir = do
+  entries <- Dir.listDirectory dir
+  -- Filter out hidden files/directories (those starting with .)
+  let visibleEntries = filter (not . List.isPrefixOf ".") entries
+  paths <- forM visibleEntries $ \entry -> do
+    let fullPath = dir FP.</> entry
+    isDir <- Dir.doesDirectoryExist fullPath
+    if isDir
+      then do
+        subPaths <- getRecursiveContents fullPath
+        -- Include both the directory and its contents
+        pure (fullPath : subPaths)
+      else pure [fullPath]
+  pure (concat paths)
+  where
+    forM = flip mapM
+
+-- | Make a path relative to a base directory
+makeRelativeTo :: FilePath -> FilePath -> FilePath
+makeRelativeTo base path =
+  let baseLen = length base
+      path' =
+        if List.isPrefixOf base path
+          then drop (baseLen + 1) path -- +1 for the /
+          else path
+   in if null path' then "." else path'
+
+-- | Match a path against a recursive pattern (the part after **)
+-- The pattern can contain additional globs
+matchRecursivePattern :: String -> FilePath -> Bool
+matchRecursivePattern "" _ = True
+-- \** matches everything
+matchRecursivePattern pat path =
+  let filename = FP.takeFileName path
+   in -- For patterns like *.txt, match against filename
+      -- For patterns like foo/*.txt, match the whole relative path
+      if '/' `elem` pat
+        then matchGlobPath pat path
+        else matchGlob pat filename
+
+-- | Match a glob pattern that may contain path separators
+matchGlobPath :: String -> FilePath -> Bool
+matchGlobPath pat path = go (splitPath pat) (splitPath path)
+  where
+    splitPath = FP.splitDirectories
+
+    go [] [] = True
+    go [] _ = False
+    go ("**" : ps) s = any (go ps) (tails s)
+    go (p : ps) (s : ss) = matchGlob p s && go ps ss
+    go _ [] = False
+
+    tails [] = [[]]
+    tails xs@(_ : xs') = xs : tails xs'
 
 splitDirPattern :: FilePath -> (FilePath, String)
 splitDirPattern p =
@@ -959,13 +1319,40 @@ runWhich args = do
         Nothing -> pure False
 
 -- | echo - print arguments
-runEcho :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
-runEcho args = do
+_runEcho :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
+_runEcho args = runEchoWithRedirects args []
+
+-- | echo with native I/O redirection support
+runEchoWithRedirects :: (MonadIO m) => [T.Text] -> [Redirection] -> StateT ShellState m ()
+runEchoWithRedirects args redirs = do
   st <- get
   let envMap = effectiveEnvMap st
-  let expanded = map (expandTextEnv envMap) args
-  liftIO $ TIO.putStrLn (T.unwords expanded)
-  setLastExit Exit.ExitSuccess
+  -- Apply brace expansion and globs to echo arguments too
+  expanded <- liftIO $ expandGlobs envMap (cwd st) args
+  let output = T.unwords expanded
+
+  result <- liftIO $ do
+    -- Find output redirection
+    let stdoutRedir = List.find (\r -> redirType r `elem` [RedirectOut, RedirectAppend]) redirs
+    case stdoutRedir of
+      Nothing -> do
+        TIO.putStrLn output
+        return (Right ())
+      Just r -> do
+        let path = expandPath (cwd st) envMap (redirTarget r)
+        writeResult <- try $ case redirType r of
+          RedirectOut -> TIO.writeFile (T.unpack path) (output <> "\n")
+          RedirectAppend -> TIO.appendFile (T.unpack path) (output <> "\n")
+          _ -> TIO.putStrLn output
+        case writeResult of
+          Left (e :: IOException) -> do
+            hPutShellError ("echo: " <> T.pack (show e))
+            return (Left e)
+          Right () -> return (Right ())
+
+  case result of
+    Left _ -> setLastExit (Exit.ExitFailure 1)
+    Right () -> setLastExit Exit.ExitSuccess
 
 -- | jobs - list background jobs
 runJobs :: (MonadIO m) => StateT ShellState m ()

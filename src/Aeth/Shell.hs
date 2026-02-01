@@ -60,7 +60,7 @@ loopNormal _cfg =
       st <- get
       promptFn <- liftIO getPrompt
       promptStr <- liftIO (promptFn st)
-      mLine <- liftIO (getLineEdited ed [] promptStr (history st))
+      mLine <- liftIO (getLineEdited ed defaultSettings [] promptStr (history st))
       case mLine of
         Nothing -> pure ()
         Just line -> do

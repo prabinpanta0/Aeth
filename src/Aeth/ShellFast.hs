@@ -228,6 +228,13 @@ mainLoop cfg = go
 mainLoopLE :: LE.LineEditor -> ShellConfig -> IO ()
 mainLoopLE ed cfg = go
   where
+    -- Create line editor settings from shell config
+    leSettings =
+      LE.LineEditorSettings
+        { LE.leSyntaxHighlighting = syntaxHighlighting cfg,
+          LE.leAutoSuggestions = autoSuggestions cfg
+        }
+
     go = do
       -- Get current state
       st <- readIORef globalStateRef
@@ -236,7 +243,7 @@ mainLoopLE ed cfg = go
       promptStr <- mkPromptFunction cfg st
 
       -- Get input with syntax highlighting
-      mInput <- LE.getLineEdited ed [] promptStr (history st)
+      mInput <- LE.getLineEdited ed leSettings [] promptStr (history st)
       case mInput of
         Nothing -> return () -- EOF (Ctrl+D)
         Just "" -> go -- Empty line
@@ -248,10 +255,6 @@ mainLoopLE ed cfg = go
 
           -- Execute
           runLineWithState line cfg
-          go
-
-          -- Execute
-          liftIO $ runLineWithState line cfg
           go
 
 -- | Run a line and update global state
@@ -266,6 +269,23 @@ runStartup :: ShellConfig -> ShellState -> IO ()
 runStartup cfg st0 = do
   writeIORef globalStateRef st0
 
+  -- Apply binary paths from config to PATH
+  let addedPaths = binaryPaths cfg
+  when (not (null addedPaths)) $ do
+    currentPath <- Env.lookupEnv "PATH"
+    let newPathParts = map T.unpack addedPaths
+        existingPath = maybe "" id currentPath
+        newPath = case existingPath of
+          "" -> intercalate ":" newPathParts
+          p -> p ++ ":" ++ intercalate ":" newPathParts
+    Env.setEnv "PATH" newPath
+    -- Also update the shell state's environment overrides
+    modifyIORef'
+      globalStateRef
+      ( \s ->
+          s {envOverrides = Map.insert "PATH" newPath (envOverrides s)}
+      )
+
   -- Source rc file
   path <- rcFilePath
   exists <- Dir.doesFileExist path
@@ -274,11 +294,40 @@ runStartup cfg st0 = do
     let ls = filter (not . T.null) (map stripComments (T.lines contents))
     mapM_ (\l -> runLineWithState (T.unpack l) cfg) ls
 
+  -- Source additional files from config
+  mapM_ (sourceFile cfg) (sourceFiles cfg)
+
   -- Load history
   hist <- readHistory
   modifyIORef' globalStateRef (\s -> s {history = hist})
   where
     stripComments t = T.strip (T.takeWhile (/= '#') t)
+
+    intercalate _sep [] = ""
+    intercalate _sep [x] = x
+    intercalate sep (x : xs) = x ++ sep ++ intercalate sep xs
+
+-- | Source a single file
+sourceFile :: ShellConfig -> T.Text -> IO ()
+sourceFile cfg filePath = do
+  -- Expand ~ to home directory
+  expandedPath <- expandTilde (T.unpack filePath)
+  exists <- Dir.doesFileExist expandedPath
+  when exists $ do
+    contents <- TIO.readFile expandedPath
+    let ls = filter (not . T.null) (map stripComments (T.lines contents))
+    mapM_ (\l -> runLineWithState (T.unpack l) cfg) ls
+  where
+    stripComments t = T.strip (T.takeWhile (/= '#') t)
+
+-- | Expand ~ in path
+expandTilde :: FilePath -> IO FilePath
+expandTilde ('~' : rest) = do
+  mHome <- Env.lookupEnv "HOME"
+  case mHome of
+    Just home -> pure (home ++ rest)
+    Nothing -> pure ('~' : rest)
+expandTilde p = pure p
 
 -- | Execute a single command/pipeline
 runOne :: (MonadIO m) => ShellConfig -> T.Text -> StateT ShellState m ()

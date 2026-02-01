@@ -2,7 +2,7 @@
 
 A hybrid Linux shell written in Haskell that bridges traditional text-based shells with modern structured data.
 
-- **Version:** 0.2.0
+- **Version:** 0.3.0
 - **License:** [MIT](LICENSE)
 
 Aeth is a polymorphic shell that supports both traditional Unix commands and structured data operations:
@@ -19,12 +19,16 @@ Aeth is a polymorphic shell that supports both traditional Unix commands and str
 - Fast startup (~25ms)
 - Process management via fork/exec
 - Path resolution through `$PATH`
-- Piping and I/O redirection
+- Native I/O redirection (>, >>, <, 2>, 2>>, &>)
+- Piping and command chaining (|, &&, ||, ;)
 - Environment variable expansion
+- Brace expansion ({a,b,c}, {1..10}, {a..z})
+- Extended globbing (\*_/_.txt recursive patterns)
 - Tab completion for commands and paths
 - Command history with up/down arrow navigation
 - Signal handling (Ctrl+C, Ctrl+D)
 - Proper quoting support
+- Custom source files and binary paths
 
 ### Built-in Commands
 
@@ -162,15 +166,18 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for details.
 - Full I/O redirection (via /bin/sh delegation)
 - Job control (fg, bg)
 - Syntax highlighting
-- Auto-suggestions (fish-like history suggestions) - works but needs polish
+- Auto-suggestions (fish-like history suggestions)
 - Command chaining (&&, ||, ;)
+- Native I/O redirection (>, >>, <, 2>, 2>>, &>)
+- Brace expansion ({a,b,c}, {1..10}, {a..z})
+- Extended globbing (`**/*.txt` recursive patterns)
+- Source files/folders feature (source.N and path.N in config)
 
 ### Planned
 
-- Native I/O redirection (without shell delegation)
-- Process substitution
-- Brace expansion
-- Extended globbing
+- Process substitution (<(cmd), >(cmd))
+- Arithmetic expansion
+- More structured commands
 
 ---
 
