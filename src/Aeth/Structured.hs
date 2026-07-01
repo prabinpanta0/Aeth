@@ -288,12 +288,12 @@ renderJson v =
   case v of
     SText t -> "\"" <> jsonEscape t <> "\""
     STable headers rows ->
-      let jsonArray = T.intercalate "," (map rowToJson rows)
-       in "[" <> jsonArray <> "]"
+      let jsonArray = T.intercalate ",\n" (map (rowToJson headers) rows)
+       in "[\n" <> jsonArray <> "\n]"
   where
-    rowToJson row =
-      let pairs = zipWith (\h v -> "  \"" <> jsonEscape h <> "\": \"" <> jsonEscape v <> "\"") headers (row ++ repeat "")
-       in "{" <> T.intercalate "," pairs <> "}"
+    rowToJson hdrs row =
+      let pairs = zipWith (\h v -> "    \"" <> jsonEscape h <> "\": \"" <> jsonEscape v <> "\"") hdrs (row ++ repeat "")
+       in "{\n" <> T.intercalate ",\n" pairs <> "\n  }"
 
     jsonEscape t =
       let escape c = case c of

@@ -96,18 +96,27 @@ splitByPipe input = go (T.unpack input) "" [] Nothing
     go (c : rest) acc segments inQuote =
       go rest (c : acc) segments inQuote
 
+-- | Known structured transform commands whose args are expressions, not shell args
+structuredTransformCmds :: [String]
+structuredTransformCmds = ["filter", "sort", "select", "unique", "json"]
+
 -- | Parse a single segment (command + args)
 parseSegment :: T.Text -> Segment
 parseSegment segText =
   let toks = tokenize (T.unpack segText)
-      -- Separate redirections from regular args
-      (args, redirs, isBg) = parseTokens toks
-   in case args of
-        [] -> Segment RawString "" [] redirs isBg
+   in case toks of
+        [] -> Segment RawString "" [] [] False
         (t : rest) ->
           case T.uncons (T.pack t) of
-            Just ('@', name) -> Segment Structured name (map T.pack rest) redirs isBg
-            _ -> Segment RawString (T.pack t) (map T.pack rest) redirs isBg
+            Just ('@', name) -> Segment Structured name (map T.pack rest) [] False
+            _ ->
+              -- For structured transform commands (filter, sort, etc.),
+              -- treat ALL remaining tokens as args — no redirection parsing
+              if t `elem` structuredTransformCmds
+                then Segment RawString (T.pack t) (map T.pack rest) [] False
+                else
+                  let (args, redirs, isBg) = parseTokens rest
+                   in Segment RawString (T.pack t) (map T.pack args) redirs isBg
 
 -- | Parse tokens into args, redirections, and background flag
 parseTokens :: [String] -> ([String], [Redirection], Bool)

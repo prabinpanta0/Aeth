@@ -294,7 +294,7 @@ structuredApply seg input =
     "head" -> do
       let n = case segArgs seg of
                 (arg : _) -> case reads (T.unpack arg) :: [(Int, String)] of
-                  [(n, "")] -> n
+                  [(num, "")] -> num
                   _ -> 10 -- default
                 [] -> 10
       case headStructured n input of
@@ -303,7 +303,7 @@ structuredApply seg input =
     "tail" -> do
       let n = case segArgs seg of
                 (arg : _) -> case reads (T.unpack arg) :: [(Int, String)] of
-                  [(n, "")] -> n
+                  [(num, "")] -> num
                   _ -> 10 -- default
                 [] -> 10
       case tailStructured n input of
