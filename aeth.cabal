@@ -23,14 +23,15 @@ executable aeth
     Aeth.Exec
     Aeth.LineEditor
     Aeth.LineEditorVty
-    Aeth.Config
     Aeth.ConfigFast
     Aeth.Parse
-    Aeth.ParseMegaparsec
-    Aeth.Shell
     Aeth.ShellFast
     Aeth.Structured
     Aeth.Types
+
+  if flag(use-hint)
+    other-modules: Aeth.Config, Aeth.Shell
+    build-depends: hint
 
   build-depends:
     , base >=4.14 && <5
@@ -45,7 +46,11 @@ executable aeth
     , filepath
     , vty
     , vty-unix
-    , hint
     , ansi-terminal
     , unix
     , tomland
+
+flag use-hint
+  description: Enable legacy config system with Haskell interpretation (slow startup)
+  default: False
+  manual: True
