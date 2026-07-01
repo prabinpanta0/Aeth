@@ -22,10 +22,10 @@ import Aeth.Exec
 import qualified Aeth.LineEditor as LE
 import Aeth.Parse
 import Aeth.Types
-import Control.Exception (IOException, catch)
+import Control.Exception (IOException, catch, try)
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.State.Strict (StateT, evalStateT, modify', runStateT)
+import Control.Monad.State.Strict (StateT, evalStateT, execStateT, modify', runStateT)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
@@ -69,6 +69,10 @@ run = do
     Nothing -> pure ()
     Just e -> TIO.hPutStrLn stderr ("aeth: " <> T.pack e)
 
+  -- Load persisted audit log
+  auditLog <- loadAuditLog
+  writeIORef globalAuditRef auditLog
+
   -- Source rc file
   runStartup cfg st0
 
@@ -96,11 +100,20 @@ runCommandLine line = do
   env0 <- Env.getEnvironment
   let st0 = emptyShellState initialCwd (Map.fromList env0)
   (cfg, errs) <- loadConfig
-  -- Surface config errors to stderr
   case errs of
     Just err -> TIO.hPutStrLn stderr ("aeth: config: " <> T.pack err)
     Nothing -> pure ()
-  evalStateT (runOne cfg (T.pack line)) st0
+  -- Load persisted audit log
+  auditLog0 <- loadAuditLog
+  writeIORef globalAuditRef auditLog0
+  -- Execute command
+  st1 <- execStateT (runOne cfg (T.pack line)) st0
+  writeIORef globalStateRef st1
+  -- Log to audit trail
+  auditLog1 <- readIORef globalAuditRef
+  (auditLog2, _) <- appendCommand auditLog1 (T.pack line) (T.pack (cwd st1)) (lastExitCode st1)
+  writeIORef globalAuditRef auditLog2
+  persistAuditLog auditLog2
 
 -- | Install signal handlers
 installSignalHandlers :: IO ()
@@ -273,6 +286,8 @@ runLineWithState line cfg = do
   auditLog <- readIORef globalAuditRef
   (newAudit, _) <- appendCommand auditLog (T.pack line) (T.pack (cwd newSt)) (lastExitCode newSt)
   writeIORef globalAuditRef newAudit
+  -- Persist audit log to disk (append-only)
+  persistAuditLog newAudit
 
 -- | Run startup (rc file, history)
 runStartup :: ShellConfig -> ShellState -> IO ()
@@ -355,3 +370,33 @@ runOne cfg t =
       end <- liftIO getCurrentTime
       let ms = max 0 (floor (realToFrac (diffUTCTime end start) * (1000 :: Double)) :: Int)
       modify' (\st -> st {lastDurationMs = Just ms})
+
+-- | Persist audit log to disk (append-only JSON file)
+persistAuditLog :: AuditLog -> IO ()
+persistAuditLog auditLog = do
+  path <- auditLogPath
+  Dir.createDirectoryIfMissing True (FP.takeDirectory path)
+  let json = exportAuditLog auditLog
+  TIO.writeFile path json
+
+-- | Load audit log from disk at startup
+loadAuditLog :: IO AuditLog
+loadAuditLog = do
+  path <- auditLogPath
+  exists <- Dir.doesFileExist path
+  if not exists
+    then pure initAuditLog
+    else do
+      result <- try (TIO.readFile path) :: IO (Either IOException T.Text)
+      case result of
+        Left _ -> pure initAuditLog
+        Right content ->
+          case importAuditLog content of
+            Just alog -> pure alog
+            Nothing -> pure initAuditLog
+
+-- | Path to the audit log file
+auditLogPath :: IO FilePath
+auditLogPath = do
+  dir <- configDir
+  pure (dir FP.</> "audit.log")

@@ -1520,7 +1520,7 @@ runAuditExport = do
   liftIO $ TIO.putStrLn "{\"note\":\"Audit log export - implement with persisted log\"}"
   setLastExit Exit.ExitSuccess
 
--- | Audit hash - show the hash of a command
+-- | Audit hash - show the SHA-like hash of a command
 runAuditHash :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
 runAuditHash args =
   case args of
@@ -1528,7 +1528,9 @@ runAuditHash args =
       liftIO $ TIO.putStrLn "usage: audit-hash <command>"
       setLastExit (Exit.ExitFailure 1)
     (cmd : _) -> do
-      -- Compute a simple hash of the command for verification
-      let hash = T.pack (show (length (T.unpack cmd)))
-      liftIO $ TIO.putStrLn ("audit-hash: " <> cmd <> " -> " <> hash)
+      let h = djb2Hash cmd
+      liftIO $ TIO.putStrLn ("audit-hash: " <> cmd <> " -> " <> h)
       setLastExit Exit.ExitSuccess
+  where
+    djb2Hash :: T.Text -> T.Text
+    djb2Hash input = T.pack (show (foldl (\acc c -> acc * 33 + fromEnum c) 5381 (T.unpack input)))

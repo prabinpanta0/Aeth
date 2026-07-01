@@ -283,12 +283,15 @@ renderStructured v =
     pad w t = t <> T.replicate (w - T.length (stripAnsi t)) " "
 
 -- | Render structured value as JSON (useful for LLM consumption)
+-- Strips ANSI escape codes from values for clean output
 renderJson :: StructuredValue -> T.Text
 renderJson v =
   case v of
-    SText t -> "\"" <> jsonEscape t <> "\""
+    SText t -> "\"" <> jsonEscape (stripAnsi t) <> "\""
     STable headers rows ->
-      let jsonArray = T.intercalate ",\n" (map (rowToJson headers) rows)
+      let cleanHeaders = map stripAnsi headers
+          cleanRows = map (map stripAnsi) rows
+          jsonArray = T.intercalate ",\n" (map (rowToJson cleanHeaders) cleanRows)
        in "[\n" <> jsonArray <> "\n]"
   where
     rowToJson hdrs row =
