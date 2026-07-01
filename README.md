@@ -2,7 +2,7 @@
 
 A hybrid Linux shell written in Haskell that bridges traditional text-based shells with modern structured data.
 
-- **Version:** 0.3.0
+- **Version:** 0.4.0
 - **License:** [MIT](LICENSE)
 
 Aeth is a polymorphic shell that supports both traditional Unix commands and structured data operations:
@@ -47,6 +47,9 @@ Aeth is a polymorphic shell that supports both traditional Unix commands and str
 | `echo [args]`      | Print arguments                    |
 | `true` / `false`   | Return exit codes                  |
 | `jobs`             | List background jobs               |
+| `audit-verify`     | Verify audit log integrity         |
+| `audit-export`     | Export audit log as JSON           |
+| `audit-hash`       | Hash a command string              |
 
 ### Structured Commands
 
@@ -62,15 +65,19 @@ Aeth is a polymorphic shell that supports both traditional Unix commands and str
 
 ### Structured Transformations
 
-| Command                      | Description             |
-| ---------------------------- | ----------------------- |
-| `filter { .field op value }` | Filter table rows       |
-| `sort .field`                | Sort table by column    |
-| `select .field1 .field2`     | Select specific columns |
+| Command                      | Description                    |
+| ---------------------------- | ------------------------------ |
+| `filter { .field op value }` | Filter table rows              |
+| `sort .field`                | Sort table by column           |
+| `select .field1 .field2`     | Select specific columns        |
+| `count`                      | Count rows                     |
+| `unique [.field]`            | Deduplicate rows               |
+| `head N` / `tail N`          | Take/skip N rows               |
+| `json`                       | Output as clean JSON           |
 
 **Filter operators:** `==`, `!=`, `>`, `>=`, `<`, `<=`, `contains`
 
-Example:
+Numeric fields (`%CPU`, `%MEM`, `size`) use numeric comparison automatically:
 
 ```bash
 @ls | filter { .size > 1MB }
@@ -79,7 +86,24 @@ Example:
 @ls | filter { .permissions == rw-r--r-- }
 @ls | filter { .name contains "dist" }
 @find | filter { .path contains "dist" }
+
+# Pipeline examples
+@ls | filter { .kind == dir } | count
+@ps | sort .%MEM | head 5
+@ls | filter { .kind == file } | json
 ```
+
+### Audit Log (Blockchain-Inspired)
+
+Every command is logged with a hash chain for tamper detection:
+
+```bash
+audit-verify     # Verify audit log integrity
+audit-export     # Export audit log as JSON
+audit-hash cmd   # Hash a command string
+```
+
+The audit log is persisted to `~/.config/aeth/audit.log` with chained hashes.
 
 ### Configurable Prompt
 
@@ -161,17 +185,21 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for details.
 - Command history with arrow navigation
 - Visual file/directory distinction
 - Structured commands (@ls, @ps, @df, @env, @find)
-- Structured transformations (filter, sort, select)
+- Structured transformations (filter, sort, select, count, unique, head, tail, json)
 - Command aliases
 - Full I/O redirection (via /bin/sh delegation)
 - Job control (fg, bg)
 - Syntax highlighting
-- Auto-suggestions (fish-like history suggestions)
+- Auto-suggestions (fish-like history suggestions, Right arrow to accept)
 - Command chaining (&&, ||, ;)
 - Native I/O redirection (>, >>, <, 2>, 2>>, &>)
 - Brace expansion ({a,b,c}, {1..10}, {a..z})
 - Extended globbing (`**/*.txt` recursive patterns)
 - Source files/folders feature (source.N and path.N in config)
+- Numeric comparison for filter (> < >= <= auto-detect numbers)
+- JSON output for LLM consumption (`@ls | json`)
+- Blockchain-inspired audit log with hash chaining
+- `--help` and `--version` flags
 
 ### Planned
 

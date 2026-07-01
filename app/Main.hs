@@ -5,7 +5,7 @@ import qualified Aeth.ShellFast as Shell
 import qualified System.Environment as Env
 
 version :: String
-version = "aeth 0.3.0.0"
+version = "aeth 0.4.0.0"
 
 helpText :: String
 helpText = unlines

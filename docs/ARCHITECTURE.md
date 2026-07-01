@@ -29,6 +29,7 @@ src/aeth/
   Structured.hs              -- Structured value types and commands
   ShellFast.hs               -- Main shell (haskeline-based)
   ConfigFast.hs              -- Simple key=value config parser
+  Audit.hs                   -- Blockchain-inspired audit log
 ```
 
 ---
@@ -114,6 +115,7 @@ Handled directly in `runRawSingle`:
 -   `pwd`, `history`, `clear`
 -   `source`, `type`, `which`, `echo`
 -   `true`, `false`, `jobs`
+-   `audit-verify`, `audit-export`, `audit-hash`
 
 ---
 
@@ -134,6 +136,11 @@ Handled directly in `runRawSingle`:
 | `filter`  | `filterStructured` |
 | `sort`    | `sortStructured`   |
 | `select`  | `selectStructured` |
+| `count`   | `countStructured`  |
+| `unique`  | `uniqueStructured` |
+| `head`    | `headStructured`   |
+| `tail`    | `tailStructured`   |
+| `json`    | `renderJson`       |
 
 ---
 

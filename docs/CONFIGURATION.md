@@ -19,6 +19,7 @@ cp config/config.toml ~/.config/aeth/config.toml
 | `~/.config/aeth/config.toml` | Main configuration             |
 | `~/.config/aeth/rc`          | Startup commands               |
 | `~/.config/aeth/history`     | Command history (auto-managed) |
+| `~/.config/aeth/audit.log`   | Tamper-proof audit log (JSON)  |
 
 ---
 
