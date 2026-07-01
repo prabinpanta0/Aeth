@@ -86,7 +86,13 @@ getLineEdited _ settings _scrollback prompt history0 =
           hFlush stdout
           pure (Just buf)
         KLeft -> loop buf (max 0 (cursor - 1)) newPrevLines histIx savedBuf
-        KRight -> loop buf (min (length buf) (cursor + 1)) newPrevLines histIx savedBuf
+        KRight ->
+          -- Fish-style: Right arrow at end of line accepts suggestion
+          if cursor >= length buf
+            then case getSuggestion buf of
+              Nothing -> loop buf (min (length buf) (cursor + 1)) newPrevLines histIx savedBuf
+              Just sug -> loop sug (length sug) newPrevLines histIx savedBuf
+            else loop buf (min (length buf) (cursor + 1)) newPrevLines histIx savedBuf
         KHome -> loop buf 0 newPrevLines histIx savedBuf
         KEnd -> loop buf (length buf) newPrevLines histIx savedBuf
         KUp ->

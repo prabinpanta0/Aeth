@@ -16,6 +16,7 @@ module Aeth.ShellFast
   )
 where
 
+import Aeth.Audit
 import Aeth.ConfigFast
 import Aeth.Exec
 import qualified Aeth.LineEditor as LE
@@ -44,6 +45,11 @@ import System.Posix.Signals (Handler (..), installHandler, sigINT, sigTSTP)
 {-# NOINLINE globalStateRef #-}
 globalStateRef :: IORef ShellState
 globalStateRef = unsafePerformIO $ newIORef (emptyShellState "/" Map.empty)
+
+-- | Global audit log reference for tamper-proof command logging
+{-# NOINLINE globalAuditRef #-}
+globalAuditRef :: IORef AuditLog
+globalAuditRef = unsafePerformIO $ newIORef initAuditLog
 
 -- | Main entry point
 run :: IO ()
@@ -257,12 +263,16 @@ mainLoopLE ed cfg = go
           runLineWithState line cfg
           go
 
--- | Run a line and update global state
+-- | Run a line and update global state, logging to audit trail
 runLineWithState :: String -> ShellConfig -> IO ()
 runLineWithState line cfg = do
   st <- readIORef globalStateRef
   ((), newSt) <- runStateT (runOne cfg (T.pack line)) st
   writeIORef globalStateRef newSt
+  -- Log to tamper-proof audit trail
+  auditLog <- readIORef globalAuditRef
+  (newAudit, _) <- appendCommand auditLog (T.pack line) (T.pack (cwd newSt)) (lastExitCode newSt)
+  writeIORef globalAuditRef newAudit
 
 -- | Run startup (rc file, history)
 runStartup :: ShellConfig -> ShellState -> IO ()

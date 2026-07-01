@@ -20,6 +20,7 @@ executable aeth
     -fspecialise-aggressively
 
   other-modules:
+    Aeth.Audit
     Aeth.Exec
     Aeth.LineEditor
     Aeth.LineEditorVty
@@ -49,6 +50,8 @@ executable aeth
     , ansi-terminal
     , unix
     , tomland
+    , bytestring
+    , aeson
 
 flag use-hint
   description: Enable legacy config system with Haskell interpretation (slow startup)
