@@ -3,6 +3,7 @@
 module Aeth.Structured
   ( StructuredValue (..),
     renderStructured,
+    renderJson,
     lsStructured,
     pwdStructured,
     filterStructured,
@@ -12,6 +13,10 @@ module Aeth.Structured
     findStructured,
     sortStructured,
     selectStructured,
+    countStructured,
+    uniqueStructured,
+    headStructured,
+    tailStructured,
     LsOptions (..),
     defaultLsOptions,
     parseLsArgs,
@@ -163,10 +168,13 @@ evalPredicate field op lit cellRaw =
                 OpEq -> a == b
                 OpNe -> a /= b
                 OpContains -> T.toCaseFold b `T.isInfixOf` T.toCaseFold a
-                OpGt -> a > b
-                OpGe -> a >= b
-                OpLt -> a < b
-                OpLe -> a <= b
+                -- For numeric comparison operators, try to parse both sides as numbers
+                -- This fixes %CPU, %MEM, and any other numeric field comparisons
+                _ | isNumericOp op ->
+                    case (parseNumericValue a, parseNumericValue b) of
+                      (Just na, Just nb) -> cmpNum op na nb
+                      _ -> cmpStr op a b
+                _ -> cmpStr op a b
   where
     stripQuotes t =
       case (T.uncons t, T.unsnoc t) of
@@ -184,6 +192,47 @@ cmpNum op a b =
     OpLt -> a < b
     OpLe -> a <= b
     OpContains -> False
+
+-- | Check if an operator requires numeric comparison
+isNumericOp :: Op -> Bool
+isNumericOp OpGt = True
+isNumericOp OpGe = True
+isNumericOp OpLt = True
+isNumericOp OpLe = True
+isNumericOp _ = False
+
+-- | Try to parse a text value as a numeric value (Int64)
+-- Handles integers and floats (truncated to Int64), with optional size suffixes
+parseNumericValue :: T.Text -> Maybe Int64
+parseNumericValue t0 =
+  let t = stripAnsi (T.strip t0)
+   in -- First try size format (1MB, 2.5G, etc.)
+      case parseSizeBytes t of
+        Just v -> Just v
+        Nothing ->
+          -- Then try plain numeric format
+          let (numTxt, unitTxt) = T.span (\c -> isDigit c || c == '.' || c == '-') t
+           in case reads (T.unpack numTxt) :: [(Double, String)] of
+                [(n, "")] ->
+                  let unit = map toLower (T.unpack (T.strip unitTxt))
+                   in Just (floor (n * fromIntegral (unitMultiplier unit)))
+                _ ->
+                  -- Try integer directly
+                  case reads (T.unpack t) :: [(Int, String)] of
+                    [(n, "")] -> Just (fromIntegral n)
+                    _ -> Nothing
+
+-- | String comparison fallback for operators
+cmpStr :: Op -> T.Text -> T.Text -> Bool
+cmpStr op a b =
+  case op of
+    OpEq -> a == b
+    OpNe -> a /= b
+    OpGt -> a > b
+    OpGe -> a >= b
+    OpLt -> a < b
+    OpLe -> a <= b
+    _ -> False
 
 parseSizeBytes :: T.Text -> Maybe Int64
 parseSizeBytes t0 =
@@ -232,6 +281,34 @@ renderStructured v =
 
     pad :: Int -> T.Text -> T.Text
     pad w t = t <> T.replicate (w - T.length (stripAnsi t)) " "
+
+-- | Render structured value as JSON (useful for LLM consumption)
+renderJson :: StructuredValue -> T.Text
+renderJson v =
+  case v of
+    SText t -> "\"" <> jsonEscape t <> "\""
+    STable headers rows ->
+      let jsonArray = T.intercalate "," (map rowToJson rows)
+       in "[" <> jsonArray <> "]"
+  where
+    rowToJson row =
+      let pairs = zipWith (\h v -> "  \"" <> jsonEscape h <> "\": \"" <> jsonEscape v <> "\"") headers (row ++ repeat "")
+       in "{" <> T.intercalate "," pairs <> "}"
+
+    jsonEscape t =
+      let escape c = case c of
+            '"' -> "\\\""
+            '\\' -> "\\\\"
+            '\n' -> "\\n"
+            '\r' -> "\\r"
+            '\t' -> "\\t"
+            _ | c < ' ' -> "\\u" <> T.pack (showHex (fromEnum c))
+            _ -> T.singleton c
+       in T.concatMap escape t
+
+    showHex n
+      | n < 16 = [toEnum (if n < 10 then n + 48 else n + 55)]
+      | otherwise = showHex (n `div` 16) ++ showHex (n `mod` 16)
 
 -- | Format file size for display (human readable)
 formatSize :: Int64 -> T.Text
@@ -479,6 +556,47 @@ selectStructured cols v =
     findShortRow maxIdx rowNum (r : rs)
       | length r <= maxIdx = Just (rowNum, length r)
       | otherwise = findShortRow maxIdx (rowNum + 1) rs
+
+-- | count - count the number of rows in a table
+countStructured :: StructuredValue -> Either T.Text StructuredValue
+countStructured v =
+  case v of
+    SText _ -> Left "count: expected table input"
+    STable _ rows ->
+      let count = length rows
+       in Right (STable ["count"] [[T.pack (show count)]])
+
+-- | unique - deduplicate rows by specified columns (or all columns if none specified)
+uniqueStructured :: [T.Text] -> StructuredValue -> Either T.Text StructuredValue
+uniqueStructured cols v =
+  case v of
+    SText _ -> Left "unique: expected table input"
+    STable headers rows -> do
+      if null cols
+        then -- Deduplicate by all columns
+          let deduped = List.nub rows
+           in Right (STable headers deduped)
+        else do
+          let resolveName n = if n == "permission" then "permissions" else n
+              colNames = map (resolveName . T.strip . T.dropWhile (== '.')) cols
+          indices <- mapM (\c -> maybe (Left ("unique: unknown column: " <> c)) Right (List.elemIndex c headers)) colNames
+          let keyExtractor r = map (r !!) indices
+              deduped = List.nubBy (\a b -> keyExtractor a == keyExtractor b) rows
+          pure (STable headers deduped)
+
+-- | head - take the first N rows
+headStructured :: Int -> StructuredValue -> Either T.Text StructuredValue
+headStructured n v =
+  case v of
+    SText _ -> Left "head: expected table input"
+    STable headers rows -> Right (STable headers (take n rows))
+
+-- | tail - skip the first N rows
+tailStructured :: Int -> StructuredValue -> Either T.Text StructuredValue
+tailStructured n v =
+  case v of
+    SText _ -> Left "tail: expected table input"
+    STable headers rows -> Right (STable headers (drop n rows))
 
 expandTilde :: FilePath -> IO FilePath
 expandTilde p

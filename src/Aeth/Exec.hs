@@ -174,10 +174,10 @@ runSingleCapture seg =
     RawString -> runRawSingleCapture seg
 
 -- | Check if a segment should be treated as structured, either explicitly (@cmd)
--- or implicitly (e.g. filter, select).
+-- or implicitly (e.g. filter, select, count, unique, head, tail).
 isStructuredSegment :: Segment -> Bool
 isStructuredSegment s =
-  segMode s == Structured || segName s `elem` ["filter", "select", "sort"]
+  segMode s == Structured || segName s `elem` ["filter", "select", "sort", "count", "unique", "head", "tail", "json"]
 
 runMulti :: (MonadIO m) => [Segment] -> StateT ShellState m ()
 runMulti segs = do
@@ -192,7 +192,7 @@ runMulti segs = do
       runViaSh cmdline
     else case segs of
       (s0 : _)
-        | segMode s0 == Structured || segName s0 `elem` ["filter", "select", "sort"] -> do
+        | segMode s0 == Structured || segName s0 `elem` ["filter", "select", "sort", "count", "unique", "head", "tail", "json"] -> do
             let (structuredHead, rawTail) = splitStructuredHead segs
             (v, ec) <- runStructuredChain structuredHead
             setLastExit ec
@@ -224,7 +224,7 @@ runMultiCapture segs = do
     else do
       case segs of
         (s0 : _)
-          | segMode s0 == Structured || segName s0 `elem` ["filter", "select", "sort"] -> do
+          | segMode s0 == Structured || segName s0 `elem` ["filter", "select", "sort", "count", "unique", "head", "tail", "json"] -> do
               let (structuredHead, rawTail) = splitStructuredHead segs
               (v, ec) <- runStructuredChain structuredHead
               setLastExit ec
@@ -246,7 +246,7 @@ splitStructuredHead = go True []
 
 isStructuredTransformLike :: Segment -> Bool
 isStructuredTransformLike s =
-  segMode s == Structured || segName s `elem` ["filter", "select", "sort"]
+  segMode s == Structured || segName s `elem` ["filter", "select", "sort", "count", "unique", "head", "tail", "json"]
 
 asStructuredTransform :: Segment -> Segment
 asStructuredTransform s =
@@ -283,6 +283,34 @@ structuredApply seg input =
       case selectStructured (segArgs seg) input of
         Left e -> pure (SText ("aeth: " <> e), Exit.ExitFailure 2)
         Right out -> pure (out, Exit.ExitSuccess)
+    "count" -> do
+      case countStructured input of
+        Left e -> pure (SText ("aeth: " <> e), Exit.ExitFailure 2)
+        Right out -> pure (out, Exit.ExitSuccess)
+    "unique" -> do
+      case uniqueStructured (segArgs seg) input of
+        Left e -> pure (SText ("aeth: " <> e), Exit.ExitFailure 2)
+        Right out -> pure (out, Exit.ExitSuccess)
+    "head" -> do
+      let n = case segArgs seg of
+                (arg : _) -> case reads (T.unpack arg) :: [(Int, String)] of
+                  [(n, "")] -> n
+                  _ -> 10 -- default
+                [] -> 10
+      case headStructured n input of
+        Left e -> pure (SText ("aeth: " <> e), Exit.ExitFailure 2)
+        Right out -> pure (out, Exit.ExitSuccess)
+    "tail" -> do
+      let n = case segArgs seg of
+                (arg : _) -> case reads (T.unpack arg) :: [(Int, String)] of
+                  [(n, "")] -> n
+                  _ -> 10 -- default
+                [] -> 10
+      case tailStructured n input of
+        Left e -> pure (SText ("aeth: " <> e), Exit.ExitFailure 2)
+        Right out -> pure (out, Exit.ExitSuccess)
+    "json" -> do
+      pure (SText (renderJson input), Exit.ExitSuccess)
     _ -> do
       -- Fallback: run as external command that consumes rendered input and captures stdout.
       st <- get
